@@ -1,6 +1,6 @@
 # quic-server-zig
 
-
+This repository is an experimental implementation and is not intended for production use.
 
 ## LICENSE
 
