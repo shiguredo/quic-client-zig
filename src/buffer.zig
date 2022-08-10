@@ -1,14 +1,19 @@
 const std = @import("std");
+const testing = std.testing;
 const allocator = std.heap.page_allocator;
+
+pub const BufferError = error {
+    OutOfRangeError,
+};
 
 pub const Buffer = struct {
     array: []u8,
-    offset: u32,
-    size: u32,
+    offset: usize,
+    size: usize,
 
     const Self = @This();
 
-    pub fn init(size: u32) !Self {
+    pub fn init(size: usize) !Self {
         const array = try allocator.alloc(u8, size);
         const new_buffer: Self = .{
             .array = array,
@@ -23,6 +28,17 @@ pub const Buffer = struct {
         self.size = 0;
         allocator.free(self.array);
     }
+
+    pub fn getSlice(self: *Self) []u8 {
+        return self.array;
+    }
+
+    pub fn getOffsetSlice(self: *Self, offset: usize) BufferError![]u8 {
+        const totalOffset = self.offset + offset;
+        if (totalOffset < 0 or totalOffset >= self.size) return BufferError.OutOfRangeError;
+
+        return self.array[totalOffset..];
+    }
 };
 
 test "buffer test" {
@@ -31,4 +47,11 @@ test "buffer test" {
 
     var buf2 = try Buffer.init(1 << 20);
     defer buf2.deinit();
+}
+
+test "get offset slice" {
+    var buf = try Buffer.init(1 << 16);
+    defer buf.deinit();
+
+    try testing.expectError(BufferError.OutOfRangeError, buf.getOffsetSlice(1<<20));
 }

@@ -1,4 +1,9 @@
 const std = @import("std");
+const buffer = @import("./buffer.zig");
+const util = @import("./util.zig");
+
+const Buffer = buffer.Buffer;
+const BufferError = buffer.BufferError;
 const crypto = std.crypto;
 const ArrayList = std.ArrayList;
 
@@ -30,7 +35,7 @@ const Header = struct {
         long = 0b1,
     };
 
-    const LongHeaderPacketTypes = enum (u2) {
+    const LongHeaderPacketTypes = enum(u2) {
         Initial = 0x00,
         ZeroRtt = 0x01,
         Handshake = 0x02,
@@ -73,7 +78,7 @@ const Header = struct {
             }
         }
 
-        // TODO: PacketNumber 
+        // TODO: PacketNumber
         // TODO: Token
 
         return .{
@@ -89,6 +94,41 @@ const Header = struct {
     }
 };
 
-const Packet = struct { header: Header, frames: ArrayList(Frame) };
+const Packet = struct {
+    const Self = @This();
+
+    header: Header,
+    frames: ArrayList(Frame),
+
+    pub fn writeBuffer(self: *Self, buffer: *Buffer) !void {
+        var count: usize = 0;
+        var slice = try buffer.getOffsetSlice(0);
+        const header = self.header;
+        const frames = self.frames;
+
+        slice[count] = header.firstByte;
+        count += 1;
+
+        const bigEndianVersion = util.getBigEndianInt(u32, header.version);
+        const versionByteCount = @sizeOf(u32);
+        @memcpy(@ptrCast([*]u8, bigEndianVersion), slice[count..(count + versionByteCount)]);
+        count += versionByteCount;
+
+        const destinationIdLength = header.destinationConnectionIdLength;
+        slice[count] = destinationIdLength;
+        count += 1;
+        @memcpy(slice[count..(count + @intCast(usize, destinationIdLength))], header.destinationConnectionId[0..destinationIdLength]);
+        count += destinationIdLength;
+
+        const sourceIdLength = header.sourceConnectionIdLength;
+        slice[count] = sourceIdLength;
+        count += 1;
+        @memcpy(slice[count..(count + @intCast(usize, sourceIdLength))], header.sourceConnectionId[0..sourceIdLength]);
+        count += sourceIdLength;
+
+        // TODO: switching by header type
+        // TODO: writing frames
+    }
+};
 
 // TODO: test for packet
