@@ -34,10 +34,10 @@ pub const Buffer = struct {
     }
 
     pub fn getOffsetSlice(self: *Self, offset: usize) BufferError![]u8 {
-        const totalOffset = self.offset + offset;
-        if (totalOffset < 0 or totalOffset >= self.size) return BufferError.OutOfRangeError;
+        const total_offset = self.offset + offset;
+        if (total_offset < 0 or total_offset >= self.size) return BufferError.OutOfRangeError;
 
-        return self.array[totalOffset..];
+        return self.array[total_offset..];
     }
 };
 

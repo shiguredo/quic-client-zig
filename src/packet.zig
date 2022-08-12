@@ -13,20 +13,20 @@ const Header = struct {
     const Self = @This();
     const MAX_ID_LENGTH = 255;
 
-    firstByte: u8,
+    first_byte: u8,
 
-    packetNumberLength: u16,
+    packet_number_length: u16,
     version: u32,
 
-    destinationConnectionIdLength: u8,
-    destinationConnectionId: [MAX_ID_LENGTH]u8,
+    destination_connection_id_length: u8,
+    destination_connection_id: [MAX_ID_LENGTH]u8,
 
-    sourceConnectionIdLength: u8,
-    sourceConnectionId: [MAX_ID_LENGTH]u8,
+    source_connection_id_length: u8,
+    source_connection_id: [MAX_ID_LENGTH]u8,
 
     token: ?ArrayList(u8),
 
-    packetNumber: [4]u8,
+    packet_number: [4]u8,
 
     const QUIC_VERSION_1: u32 = 0x00000001;
 
@@ -36,45 +36,45 @@ const Header = struct {
     };
 
     const LongHeaderPacketTypes = enum(u2) {
-        Initial = 0x00,
-        ZeroRtt = 0x01,
-        Handshake = 0x02,
-        Retry = 0x03,
+        initial = 0x00,
+        zero_rtt = 0x01,
+        handshake = 0x02,
+        retry = 0x03,
     };
 
     const FIRST_BYTE_FIXED_BIT: comptime_int = 0b01000000;
 
-    pub fn initialPacketHeader(givenSourceId: ?[]u8, givenDestinaitonId: ?[]u8) Self {
-        const firstByte: u8 = 0x00;
-        firstByte |= @enumToInt(HeaderForm.long) << 7;
-        firstByte |= FIRST_BYTE_FIXED_BIT;
-        firstByte |= @enumToInt(LongHeaderPacketTypes.Initial) << 4;
+    pub fn initialPacketHeader(given_source_id: ?[]u8, given_destination_id: ?[]u8) Self {
+        const first_byte: u8 = 0x00;
+        first_byte |= @enumToInt(HeaderForm.long) << 7;
+        first_byte |= FIRST_BYTE_FIXED_BIT;
+        first_byte |= @enumToInt(LongHeaderPacketTypes.initial) << 4;
 
-        var sourceIdLength: u8 = undefined;
-        var sourceId: [MAX_ID_LENGTH]u8 = undefined;
-        if (givenSourceId) |sId| { // if source connection id is given by server
-            sourceIdLength = @intCast(u8, sId.len);
-            for (sId) |value, index| {
-                sourceId[index] = value;
+        var source_id_length: u8 = undefined;
+        var source_id: [MAX_ID_LENGTH]u8 = undefined;
+        if (given_source_id) |s_id| { // if source connection id is given by server
+            source_id_length = @intCast(u8, s_id.len);
+            for (s_id) |value, index| {
+                source_id[index] = value;
             }
         } else { // if source connection id is not given
-            sourceIdLength = 8;
-            for (sourceId[0..sourceIdLength]) |_, index| {
-                sourceId[index] = crypto.random.int(u8);
+            source_id_length = 8;
+            for (source_id[0..source_id_length]) |_, index| {
+                source_id[index] = crypto.random.int(u8);
             }
         }
 
-        var destinationIdLength: u8 = undefined;
-        var destinationId: [MAX_ID_LENGTH]u8 = undefined;
-        if (givenDestinationId) |dId| { // if destination connection id is given by server
-            destinationIdLength = @intCast(u8, dId.len);
-            for (dId) |value, index| {
-                destinationId[index] = value;
+        var destination_id_length: u8 = undefined;
+        var destination_id: [MAX_ID_LENGTH]u8 = undefined;
+        if (given_destination_id) |d_id| { // if destination connection id is given by server
+            destination_id_length = @intCast(u8, d_id.len);
+            for (d_id) |value, index| {
+                destination_id[index] = value;
             }
         } else { // if source connection id is not given (first initial packet)
-            destinationIdLength = 8;
-            for (destinationId[0..destinaitonIdLength]) |_, index| {
-                destinationId[index] = crypto.random.int(u8);
+            destination_id_length = 8;
+            for (destination_id[0..destination_id_length]) |_, index| {
+                destination_id[index] = crypto.random.int(u8);
             }
         }
 
@@ -82,14 +82,14 @@ const Header = struct {
         // TODO: Token
 
         return .{
-            .firstByte = firstByte,
+            .first_byte = first_byte,
             .version = QUIC_VERSION_1,
-            .destinaitonIdLength = destinationIdLength,
-            .destinaitonId = destinationId,
-            .sourceIdLength = sourceIdLength,
-            .sourceId = sourceId,
+            .destination_connection_id_length = destination_id_length,
+            .destination_connection_id = destination_id,
+            .source_connection_id_length = source_id_length,
+            .source_connection_id = source_id,
             .token = null,
-            .packetNumber = 0,
+            .packet_number = 0,
         };
     }
 };
@@ -100,31 +100,31 @@ const Packet = struct {
     header: Header,
     frames: ArrayList(Frame),
 
-    pub fn writeBuffer(self: *Self, buffer: *Buffer) !void {
+    pub fn writeBuffer(self: *Self, buf: *Buffer) !void {
         var count: usize = 0;
-        var slice = try buffer.getOffsetSlice(0);
+        var slice = try buf.getOffsetSlice(0);
         const header = self.header;
         const frames = self.frames;
 
-        slice[count] = header.firstByte;
+        slice[count] = header.first_byte;
         count += 1;
 
-        const bigEndianVersion = util.getBigEndianInt(u32, header.version);
-        const versionByteCount = @sizeOf(u32);
-        @memcpy(@ptrCast([*]u8, bigEndianVersion), slice[count..(count + versionByteCount)]);
-        count += versionByteCount;
+        const big_endian_version = util.getBigEndianInt(u32, header.version);
+        const version_byte_count = @sizeOf(u32);
+        @memcpy(@ptrCast([*]u8, big_endian_version), slice[count..(count + version_byte_count)], version_byte_count);
+        count += version_byte_count;
 
-        const destinationIdLength = header.destinationConnectionIdLength;
-        slice[count] = destinationIdLength;
+        const destination_id_length = header.destination_connection_id_length;
+        slice[count] = destination_id_length;
         count += 1;
-        @memcpy(slice[count..(count + @intCast(usize, destinationIdLength))], header.destinationConnectionId[0..destinationIdLength]);
-        count += destinationIdLength;
+        @memcpy(slice[count..(count + @intCast(usize, destination_id_length))], header.destination_connection_id[0..destination_id_length], destination_id_length);
+        count += destination_id_length;
 
-        const sourceIdLength = header.sourceConnectionIdLength;
-        slice[count] = sourceIdLength;
+        const source_id_length = header.source_connection_id_length;
+        slice[count] = source_id_length;
         count += 1;
-        @memcpy(slice[count..(count + @intCast(usize, sourceIdLength))], header.sourceConnectionId[0..sourceIdLength]);
-        count += sourceIdLength;
+        @memcpy(slice[count..(count + @intCast(usize, source_id_length))], header.source_connection_id[0..source_id_length], source_id_length);
+        count += source_id_length;
 
         // TODO: switching by header type
         // TODO: writing frames
