@@ -20,10 +20,11 @@ pub const WriteError = error {
 
 /// write value in BIG ENDIAN and returns written byte count
 pub fn writeIntReturnSize(comptime T: type, dst: []u8, value: T) WriteError!usize {
-    if (dst.len < @as(usize, @sizeOf(T))) return WriteError.BufferShortError;
+    const write_size = @as(usize, @bitSizeOf(T) / 8);
+    if (dst.len < write_size) return WriteError.BufferShortError;
 
-    std.mem.writeInt(T, dst[0..@sizeOf(T)], value, .Big);
-    return @sizeOf(T);
+    std.mem.writeInt(T, dst[0..write_size], value, .Big);
+    return write_size;
 }
 
 /// copy buffer with offset and returns written byte count

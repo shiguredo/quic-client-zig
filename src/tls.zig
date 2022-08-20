@@ -1,8 +1,10 @@
 const std = @import("std");
 const crypto = std.crypto;
-const q_crypto = @import("crypto.zig");
 const io = std.io;
 const mem = std.mem;
+const testing = std.testing;
+
+const q_crypto = @import("crypto.zig");
 const util = @import("util.zig");
 
 const Hmac = crypto.auth.hmac.sha2.HmacSha256;
@@ -45,63 +47,136 @@ pub const Provider = struct {
     }
 };
 
-pub const Handshake = struct {
-    msg_type: HandshakeType,
-    length: u24,
-    content: Content,
+pub const HandshakeType = enum(u8) {
+    client_hello = 0x01,
+    server_hello = 0x02,
+};
+
+pub const Handshake = union(HandshakeType) {
+    client_hello: ClientHello,
+    server_hello: ServerHello,
 
     const Self = @This();
-
-    pub const HandshakeType = enum(u8) {
-        client_hello = 0x01,
-        server_hello = 0x02,
-    };
 
     const Content = union(HandshakeType) {
         client_hello: ClientHello,
         server_hello: ServerHello,
     };
 
+    pub fn initClient(allocator: mem.Allocator) !Self {
+        var instance = Self{
+            .client_hello = try ClientHello.init(allocator),
+        };
+        return instance;
+    }
+
+    pub fn deinit(self: *Self) void {
+        switch (self.*) {
+            .client_hello => |*h| h.deinit(),
+            .server_hello => {},
+        }
+    }
+
+    /// implemented only for .{.client_hello} .
     pub fn writeBuffer(self: *Self, out: []u8) util.WriteError!usize {
         var offset: usize = 0;
-        offset += try util.writeIntReturnSize(u8, out[offset..], @enumToInt(self.msg_type));
+        const msg_type = @enumToInt(@as(HandshakeType, self.*));
+        offset += try util.writeIntReturnSize(u8, out[offset..], msg_type);
+
+        const len_pos = offset;
+
+        offset += @as(usize, @bitSizeOf(u24) / 8);
+        const len = switch (self.*) {
+            .client_hello => |c_hello| try c_hello.writeBuffer(out[offset..]),
+            .server_hello => unreachable,
+        };
+
+        _ = try util.writeIntReturnSize(u24, out[len_pos .. len_pos + 3], @intCast(u24, len));
+
+        return offset + len;
     }
 };
 
 /// TLS 1.3 ClientHello
 pub const ClientHello = struct {
     const LEGACY_VERSION: u16 = 0x0303;
+    const SessionId = std.BoundedArray(u8, 32);
+    const CipherSuites = std.BoundedArray([2]u8, 65536 / @sizeOf([2]u8));
+    const CompressionMethods = std.BoundedArray(u8, 256);
+    const Extensions = std.ArrayList(extension.Extension);
 
-    random_byte: [32]u8,
-    legacy_session_id: std.ArrayList(u8),
-    cipher_suites: std.ArrayList([2]u8),
-    legacy_compression_methods: std.ArrayList(u8),
-    extensions: std.ArrayList(extension.Extension),
+    random_bytes: [32]u8,
+    legacy_session_id: SessionId,
+    cipher_suites: CipherSuites,
+    legacy_compression_methods: CompressionMethods,
+    extensions: Extensions,
 
     const Self = @This();
 
-    pub fn init() !Self {}
+    pub fn init(allocator: mem.Allocator) !Self {
+        var instance = Self{
+            .random_bytes = undefined,
+            .legacy_session_id = try SessionId.init(0),
+            .cipher_suites = try CipherSuites.init(0),
+            .legacy_compression_methods = try CompressionMethods.init(0),
+            .extensions = Extensions.init(allocator),
+        };
+
+        crypto.random.bytes(&instance.random_bytes); // assign random bytes
+        try instance.cipher_suites.appendSlice(&[_][2]u8{.{ 0x13, 0x01 }}); // supports TLS_AES_128_GCM_SHA256
+        try instance.legacy_compression_methods.appendSlice(&[_]u8{0}); // value for "null"
+
+        try instance.extensions.append(
+            .{ .supported_groups = try extension.SupportedGroups.init() },
+        );
+        try instance.extensions.append(
+            .{ .signature_algorithms = try extension.SignatureAlgorithms.init() },
+        );
+        try instance.extensions.append(
+            .{ .supported_versions = extension.SupportedVersions.init() },
+        );
+        try instance.extensions.append(
+            .{ .key_share = try extension.KeyShare.init(allocator) },
+        );
+
+        return instance;
+    }
+
+    pub fn deinit(self: *Self) void {
+        for (self.extensions.items) |*ext| {
+            ext.deinit();
+        }
+        self.extensions.deinit();
+    }
 
     /// writes to buffer and returns write count 
     pub fn writeBuffer(self: *const Self, out: []u8) util.WriteError!usize {
         var offset: usize = 0;
+
+        // legacy_version
         offset += try util.writeIntReturnSize(u16, out[offset..], LEGACY_VERSION);
 
-        offset += try util.copyWithOffset(out[offset..], &self.random_byte);
+        // ramdom
+        offset += try util.copyReturnSize(out[offset..], &self.random_bytes);
 
-        offset += try util.writeIntReturnSize(u8, out[offset..], @intCast(u8, self.legacy_session_id.items.len));
+        // legacy_session_id
+        offset += try util.writeIntReturnSize(u8, out[offset..], @intCast(u8, self.legacy_session_id.len));
+        offset += try util.copyReturnSize(out[offset..], self.legacy_session_id.constSlice());
 
-        offset += try util.copyWithOffset(out[offset..], self.legacy_session_id.items);
-
-        const suites_byte_ptr = mem.asBytes(self.cipher_suites.items);
+        // cipher_suites
+        const suites_byte_ptr = mem.sliceAsBytes(self.cipher_suites.constSlice());
         offset += try util.writeIntReturnSize(u16, out[offset..], @intCast(u16, suites_byte_ptr.len));
-        offset += try util.copyWithOffset(out[offset..], suites_byte_ptr);
+        offset += try util.copyReturnSize(out[offset..], suites_byte_ptr);
+
+        // legacy_compression_methods
+        offset += try util.writeIntReturnSize(u8, out[offset..], @intCast(u8, self.legacy_compression_methods.len));
+        offset += try util.copyReturnSize(out[offset..], self.legacy_compression_methods.constSlice());
 
         // extensions
         const ext_len_offset = offset;
-        offset += @sizeof(u16);
+        offset += @as(usize, @sizeOf(u16));
         var ext_total_len: usize = 0;
-        for (self.extensions) |ext, index| {
+        for (self.extensions.items) |*ext| {
             const ext_len = try ext.writeBuffer(out[offset..]);
             offset += ext_len;
             ext_total_len += ext_len;
@@ -123,10 +198,6 @@ pub const extension = struct {
         key_share = 51,
     };
 
-    pub const ReadError = error{
-        BufferShortError,
-    };
-
     pub const Extension = union(ExtensionType) {
         supported_groups: SupportedGroups,
         signature_algorithms: SignatureAlgorithms,
@@ -135,23 +206,32 @@ pub const extension = struct {
 
         const Self = @This();
 
+        pub fn deinit(self: *Self) void {
+            switch (self.*) {
+                .key_share => |*e| e.deinit(),
+                else => {},
+            }
+        }
+
         /// writes to buffer and returns write count 
         pub fn writeBuffer(self: *const Self, out: []u8) util.WriteError!usize {
             var offset: usize = 0;
-            const ext_type = @as(ExtensionType, self);
+            const ext_type = @as(ExtensionType, self.*);
             offset += try util.writeIntReturnSize(u16, out[offset..], @enumToInt(ext_type));
             const len_pos = offset;
+            offset += @as(usize, @sizeOf(u16));
 
-            const data_len = try switch (self) {
-                .supported_groups => |e| e.writeBuffer(out),
-                .signature_algorithms => |e| e.writeBuffer(out),
-                .supported_versions => |e| e.writeBuffer(out),
-                .key_share => |e| e.writeBuffer(out),
+            var data_field_out = out[offset..];
+            const data_len = try switch (self.*) {
+                .supported_groups => |e| e.writeBuffer(data_field_out),
+                .signature_algorithms => |e| e.writeBuffer(data_field_out),
+                .supported_versions => |e| e.writeBuffer(data_field_out),
+                .key_share => |e| e.writeBuffer(data_field_out),
             };
 
-            _ = try util.writeIntReturnSize(u16, out[len_pos .. len_pos + @sizeOf(u16)], data_len);
+            _ = try util.writeIntReturnSize(u16, out[len_pos .. len_pos + @sizeOf(u16)], @intCast(u16, data_len));
 
-            return len_pos + data_len + @sizeof(u16);
+            return len_pos + data_len + @as(usize, @sizeOf(u16));
         }
     };
 
@@ -175,7 +255,7 @@ pub const extension = struct {
         ecdhe_private_use,
     };
 
-    pub const SignatureScheme = union(u16) {
+    pub const SignatureScheme = enum(u16) {
         // RSASSA-PKCS1-v1_5 algorithms
         rsa_pksc1_sha256 = 0x0401,
         rsa_pksc1_sha384 = 0x0501,
@@ -209,28 +289,51 @@ pub const extension = struct {
     };
 
     pub const SupportedGroups = struct {
-        named_group_list: std.ArrayList(NamedGroup),
+        const NamedGroupList = std.BoundedArray(NamedGroup, 65536 / @sizeOf(NamedGroup));
+
+        named_group_list: NamedGroupList,
 
         const Self = @This();
 
-        pub fn writeBuffer(self, out: []u8) util.WriteError!usize {
-            var offset: usize = 0;
-            const bytes = mem.asBytes(self.named_group_list.items);
+        pub fn init() !Self {
+            var list = try NamedGroupList.init(0);
+            try list.append(.x25519);
+            return Self{
+                .named_group_list = list,
+            };
+        }
 
-            offset += try util.writeIntReturnSize(u16, out[offset..], @intCast(u16, bytes.len));
-            offset += try util.copyReturnSize(out[offset..], bytes);
+        pub fn writeBuffer(self: *const Self, out: []u8) util.WriteError!usize {
+            var offset: usize = 0;
+
+            const slice = self.named_group_list.constSlice();
+
+            offset += try util.writeIntReturnSize(u16, out[offset..], @intCast(u16, slice.len * 2));
+            for (slice) |group| {
+                offset += try util.writeIntReturnSize(u16, out[offset..], @enumToInt(group));
+            }
+
             return offset;
         }
     };
 
     pub const SignatureAlgorithms = struct {
-        supported_algorithms: std.ArrayList(SignatureScheme),
+        const Algorithms = std.BoundedArray(SignatureScheme, 65536 / @sizeOf(SignatureScheme));
+        supported_algorithms: Algorithms,
 
         const Self = @This();
 
-        pub fn writeBuffer(self: *Self, out: []u8) util.WriteError!usize {
+        pub fn init() !Self {
+            var supports = try Algorithms.init(0);
+            try supports.append(.ecdsa_secp256r1_sha256);
+            return Self{
+                .supported_algorithms = supports,
+            };
+        }
+
+        pub fn writeBuffer(self: *const Self, out: []u8) util.WriteError!usize {
             var offset: usize = 0;
-            const bytes = mem.asBytes(self.supported_algorithms.items);
+            const bytes = mem.sliceAsBytes(self.supported_algorithms.constSlice());
 
             offset += try util.writeIntReturnSize(u16, out[offset..], @intCast(u16, bytes.len));
             offset += try util.copyReturnSize(out[offset..], bytes);
@@ -243,9 +346,14 @@ pub const extension = struct {
         pub const TLS13 = 0x0304;
         const Self = @This();
 
-        pub fn writeBuffer(self: *Self, out: []u8) util.WriteError!usize {
+        pub fn init() Self {
+            return .{};
+        }
+
+        pub fn writeBuffer(self: *const Self, out: []u8) util.WriteError!usize {
+            _ = self;
             var offset: usize = 0;
-            offset += try util.writeIntReturnSize(u8, out[offset..], @as(u8, 2));
+            offset += try util.writeIntReturnSize(u8, out[offset..], @as(u8, @sizeOf(u16)));
             offset += try util.writeIntReturnSize(u16, out[offset..], @as(u16, TLS13));
             return offset;
         }
@@ -253,23 +361,66 @@ pub const extension = struct {
 
     /// KeyShareClientHello
     pub const KeyShare = struct {
-        shares: std.ArrayList(KeyShareEntry),
+        const Shares = std.ArrayList(KeyShareEntry);
+
+        shares: Shares,
 
         const Self = @This();
 
-        const KeyShareEntry = struct {
+        pub const KeyShareEntry = struct {
             group: NamedGroup,
             key_exchange: std.ArrayList(u8),
         };
 
-        pub fn writeBuffer(self: *Self, out: []u8) util.WriteError!void {
-            var offset: usize = 2;
-            for (self.shares.items) |share| {
+        pub fn init(allocator: mem.Allocator) !Self {
+            var shares = Shares.init(allocator);
+
+            return Self{
+                .shares = shares,
+            };
+        }
+
+        pub fn deinit(self: *Self) void {
+            for (self.shares.items) |entry| {
+                entry.key_exchange.deinit();
+            }
+            self.shares.deinit();
+        }
+
+        pub fn writeBuffer(self: *const Self, out: []u8) util.WriteError!usize {
+            var offset: usize = @sizeOf(u16);
+            for (self.shares.items) |*share| {
                 offset += try util.writeIntReturnSize(u16, out[offset..], @enumToInt(share.group));
                 offset += try util.writeIntReturnSize(u16, out[offset..], @intCast(u16, self.shares.items.len));
-                offset += try util.copyReturnSize(out[offset..], self.shares.items);
+                offset += try util.copyReturnSize(out[offset..], share.key_exchange.items);
             }
+            _ = try util.writeIntReturnSize(u16, out[0..], @intCast(u16, offset - @as(usize, @sizeOf(u16))));
             return offset;
         }
     };
 };
+
+test "client hello" {
+    var client_hello = try Handshake.initClient(testing.allocator);
+    defer client_hello.deinit();
+    var buf: [65536]u8 = undefined;
+    const len = try client_hello.writeBuffer(&buf);
+    const before_random = buf[0..6];
+    const after_random = buf[6 + 32 .. len];
+    try testing.expectEqual(@as(u8, 0x01), buf[0]); // handshake type "ClientHello"
+    try testing.expectEqual(len - 4, @intCast(usize, mem.readInt(u24, before_random[1..4], .Big))); // length field of handshake
+    try testing.expectEqual(@as(u16, 0x0303), mem.readInt(u16, before_random[4..6], .Big)); // legacy_version == 0x0303
+
+    try testing.expectFmt(
+        ("00" ++ // legacy_session_id
+            "00021301" ++ // cipher_suites
+            "0100" ++ // legacy_compression_id
+            "001D" ++ // extension field length
+            "000A00040002001D" ++ // supported_groups
+            "000D000400020304" ++ // sigunature_algorithms
+            "002B0003020304" ++ // supported_versions
+            "003300020000"), // key_share
+        "{s}",
+        .{std.fmt.fmtSliceHexUpper(after_random)},
+    );
+}
