@@ -326,6 +326,8 @@ pub const extension = struct {
         pub fn init() !Self {
             var supports = try Algorithms.init(0);
             try supports.append(.ecdsa_secp256r1_sha256);
+            try supports.append(.rsa_pss_rsae_sha256);
+            try supports.append(.rsa_pksc1_sha256);
             return Self{
                 .supported_algorithms = supports,
             };
@@ -333,10 +335,12 @@ pub const extension = struct {
 
         pub fn writeBuffer(self: *const Self, out: []u8) util.WriteError!usize {
             var offset: usize = 0;
-            const bytes = mem.sliceAsBytes(self.supported_algorithms.constSlice());
+            const slice = self.supported_algorithms.constSlice();
 
-            offset += try util.writeIntReturnSize(u16, out[offset..], @intCast(u16, bytes.len));
-            offset += try util.copyReturnSize(out[offset..], bytes);
+            offset += try util.writeIntReturnSize(u16, out[offset..], @intCast(u16, slice.len * @sizeOf(u16)));
+            for (slice) |algo| {
+                offset += try util.writeIntReturnSize(u16, out[offset..], @enumToInt(algo));
+            }
             return offset;
         }
     };
@@ -415,9 +419,9 @@ test "client hello" {
         ("00" ++ // legacy_session_id
             "00021301" ++ // cipher_suites
             "0100" ++ // legacy_compression_id
-            "001D" ++ // extension field length
+            "0021" ++ // extension field length
             "000A00040002001D" ++ // supported_groups
-            "000D000400020304" ++ // sigunature_algorithms
+            "000D00080006040308040401" ++ // sigunature_algorithms
             "002B0003020304" ++ // supported_versions
             "003300020000"), // key_share
         "{s}",
