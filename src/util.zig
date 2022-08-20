@@ -14,6 +14,27 @@ test "getBigEndian" {
     try testing.expect(getBigEndianInt(u32, 0x01020304) == @as(u32, 0x04030201));
 }
 
+pub const WriteError = error {
+    BufferShortError,
+};
+
+/// write value in BIG ENDIAN and returns written byte count
+pub fn writeIntReturnSize(comptime T: type, dst: []u8, value: T) WriteError!usize {
+    if (dst.len < @as(usize, @sizeOf(T))) return WriteError.BufferShortError;
+
+    std.mem.writeInt(T, dst[0..@sizeOf(T)], value, .Big);
+    return @sizeOf(T);
+}
+
+/// copy buffer with offset and returns written byte count
+pub fn copyReturnSize(dst: []u8, source: []const u8) WriteError!usize {
+    if (dst.len < source.len) return WriteError.BufferShortError;
+
+    const len = source.len;
+    std.mem.copy(u8, dst[0..len], source);
+    return len;
+}
+
 pub const VariableLengthInt = struct {
     len: usize,
     value: u64,
