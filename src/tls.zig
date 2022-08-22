@@ -78,7 +78,7 @@ pub const Handshake = union(HandshakeType) {
     }
 
     /// implemented only for .{.client_hello} .
-    pub fn writeBuffer(self: *Self, out: []u8) util.WriteError!usize {
+    pub fn writeBuffer(self: *const Self, out: []u8) util.WriteError!usize {
         var offset: usize = 0;
         const msg_type = @enumToInt(@as(HandshakeType, self.*));
         offset += try util.writeIntReturnSize(u8, out[offset..], msg_type);
@@ -126,18 +126,14 @@ pub const ClientHello = struct {
         try instance.cipher_suites.appendSlice(&[_][2]u8{.{ 0x13, 0x01 }}); // supports TLS_AES_128_GCM_SHA256
         try instance.legacy_compression_methods.appendSlice(&[_]u8{0}); // value for "null"
 
-        try instance.extensions.append(
+        const extensions = [_]extension.Extension{
             .{ .supported_groups = try extension.SupportedGroups.init() },
-        );
-        try instance.extensions.append(
             .{ .signature_algorithms = try extension.SignatureAlgorithms.init() },
-        );
-        try instance.extensions.append(
             .{ .supported_versions = extension.SupportedVersions.init() },
-        );
-        try instance.extensions.append(
             .{ .key_share = try extension.KeyShare.init(allocator) },
-        );
+        };
+
+        try instance.extensions.appendSlice(&extensions);
 
         return instance;
     }
