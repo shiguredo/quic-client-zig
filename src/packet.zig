@@ -100,7 +100,7 @@ const Packet = struct {
     header: Header,
     frames: ArrayList(Frame),
 
-    pub fn writeBuffer(self: *Self, buf: *Buffer) !void {
+    pub fn encode(self: *Self, buf: *Buffer) !void {
         var count: usize = 0;
         var slice = try buf.getOffsetSlice(0);
         const header = self.header;

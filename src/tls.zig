@@ -78,7 +78,7 @@ pub const Handshake = union(HandshakeType) {
     }
 
     /// implemented only for .{.client_hello} .
-    pub fn writeBuffer(self: *const Self, out: []u8) util.WriteError!usize {
+    pub fn encode(self: *const Self, out: []u8) util.WriteError!usize {
         var offset: usize = 0;
         const msg_type = @enumToInt(@as(HandshakeType, self.*));
         offset += try util.writeIntReturnSize(u8, out[offset..], msg_type);
@@ -87,7 +87,7 @@ pub const Handshake = union(HandshakeType) {
 
         offset += @as(usize, @bitSizeOf(u24) / 8);
         const len = switch (self.*) {
-            .client_hello => |c_hello| try c_hello.writeBuffer(out[offset..]),
+            .client_hello => |c_hello| try c_hello.encode(out[offset..]),
             .server_hello => unreachable,
         };
 
@@ -146,7 +146,7 @@ pub const ClientHello = struct {
     }
 
     /// writes to buffer and returns write count 
-    pub fn writeBuffer(self: *const Self, out: []u8) util.WriteError!usize {
+    pub fn encode(self: *const Self, out: []u8) util.WriteError!usize {
         var offset: usize = 0;
 
         // legacy_version
@@ -173,7 +173,7 @@ pub const ClientHello = struct {
         offset += @as(usize, @sizeOf(u16));
         var ext_total_len: usize = 0;
         for (self.extensions.items) |*ext| {
-            const ext_len = try ext.writeBuffer(out[offset..]);
+            const ext_len = try ext.encode(out[offset..]);
             offset += ext_len;
             ext_total_len += ext_len;
         }
@@ -210,7 +210,7 @@ pub const extension = struct {
         }
 
         /// writes to buffer and returns write count 
-        pub fn writeBuffer(self: *const Self, out: []u8) util.WriteError!usize {
+        pub fn encode(self: *const Self, out: []u8) util.WriteError!usize {
             var offset: usize = 0;
             const ext_type = @as(ExtensionType, self.*);
             offset += try util.writeIntReturnSize(u16, out[offset..], @enumToInt(ext_type));
@@ -219,10 +219,10 @@ pub const extension = struct {
 
             var data_field_out = out[offset..];
             const data_len = try switch (self.*) {
-                .supported_groups => |e| e.writeBuffer(data_field_out),
-                .signature_algorithms => |e| e.writeBuffer(data_field_out),
-                .supported_versions => |e| e.writeBuffer(data_field_out),
-                .key_share => |e| e.writeBuffer(data_field_out),
+                .supported_groups => |e| e.encode(data_field_out),
+                .signature_algorithms => |e| e.encode(data_field_out),
+                .supported_versions => |e| e.encode(data_field_out),
+                .key_share => |e| e.encode(data_field_out),
             };
 
             _ = try util.writeIntReturnSize(u16, out[len_pos .. len_pos + @sizeOf(u16)], @intCast(u16, data_len));
@@ -299,7 +299,7 @@ pub const extension = struct {
             };
         }
 
-        pub fn writeBuffer(self: *const Self, out: []u8) util.WriteError!usize {
+        pub fn encode(self: *const Self, out: []u8) util.WriteError!usize {
             var offset: usize = 0;
 
             const slice = self.named_group_list.constSlice();
@@ -329,7 +329,7 @@ pub const extension = struct {
             };
         }
 
-        pub fn writeBuffer(self: *const Self, out: []u8) util.WriteError!usize {
+        pub fn encode(self: *const Self, out: []u8) util.WriteError!usize {
             var offset: usize = 0;
             const slice = self.supported_algorithms.constSlice();
 
@@ -350,7 +350,7 @@ pub const extension = struct {
             return .{};
         }
 
-        pub fn writeBuffer(self: *const Self, out: []u8) util.WriteError!usize {
+        pub fn encode(self: *const Self, out: []u8) util.WriteError!usize {
             _ = self;
             var offset: usize = 0;
             offset += try util.writeIntReturnSize(u8, out[offset..], @as(u8, @sizeOf(u16)));
@@ -387,7 +387,7 @@ pub const extension = struct {
             self.shares.deinit();
         }
 
-        pub fn writeBuffer(self: *const Self, out: []u8) util.WriteError!usize {
+        pub fn encode(self: *const Self, out: []u8) util.WriteError!usize {
             var offset: usize = @sizeOf(u16);
             for (self.shares.items) |*share| {
                 offset += try util.writeIntReturnSize(u16, out[offset..], @enumToInt(share.group));
@@ -404,7 +404,7 @@ test "client hello" {
     var client_hello = try Handshake.initClient(testing.allocator);
     defer client_hello.deinit();
     var buf: [65536]u8 = undefined;
-    const len = try client_hello.writeBuffer(&buf);
+    const len = try client_hello.encode(&buf);
     const before_random = buf[0..6];
     const after_random = buf[6 + 32 .. len];
     try testing.expectEqual(@as(u8, 0x01), buf[0]); // handshake type "ClientHello"
