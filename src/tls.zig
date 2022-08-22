@@ -28,7 +28,7 @@ pub const Provider = struct {
     const QUIC_HP_KEY_LENGTH = 16;
 
     /// derives initial secret from client's destination connection ID
-    /// and set it to self.initial_secret  
+    /// and set it to self.initial_secret
     pub fn setUpInitial(self: *Self, key: []const u8) void {
         const initial_secret = Hkdf.extract(&q_crypto.INITIAL_SALT_V1, key);
         self.initial_secret = initial_secret;
@@ -44,6 +44,28 @@ pub const Provider = struct {
 
         q_crypto.hkdfExpandLabel(&self.client_hp, self.client_initial, "quic hp", "");
         q_crypto.hkdfExpandLabel(&self.server_hp, self.server_initial, "quic hp", "");
+    }
+};
+
+pub const TlsMessageType = enum {
+    handshake,
+};
+
+pub const TlsMessage = struct {
+    handshake: Handshake,
+
+    const Self = @This();
+
+    pub fn getEncLen(self: *const Self) usize {
+        return switch (self.*) {
+            .handshake => |*m| m.getEncLen(),
+        };
+    }
+
+    pub fn encode(self: *const Self, out: []u8) util.WriteError!usize {
+        return switch (self.*) {
+            .handshake => |*m| m.encode(out),
+        };
     }
 };
 
@@ -77,6 +99,21 @@ pub const Handshake = union(HandshakeType) {
         }
     }
 
+    pub fn getEncLen(self: *const Self) usize {
+        var len: usize = blk: {
+            comptime var temp = 0;
+            temp += @sizeOf(HandshakeType);
+            temp += @bitSizeOf(u24) / 8; // length field
+            break :blk temp;
+        };
+        len += switch (self.*) {
+            .client_hello => |*h| h.getEncLen(),
+            .server_hello => 0, // TODO: implement for server hello
+        };
+
+        return len;
+    }
+
     /// implemented only for .{.client_hello} .
     pub fn encode(self: *const Self, out: []u8) util.WriteError!usize {
         var offset: usize = 0;
@@ -88,7 +125,7 @@ pub const Handshake = union(HandshakeType) {
         offset += @as(usize, @bitSizeOf(u24) / 8);
         const len = switch (self.*) {
             .client_hello => |c_hello| try c_hello.encode(out[offset..]),
-            .server_hello => unreachable,
+            .server_hello => 0, // TODO: inmplement for server hello
         };
 
         _ = try util.writeIntReturnSize(u24, out[len_pos .. len_pos + 3], @intCast(u24, len));
@@ -100,6 +137,7 @@ pub const Handshake = union(HandshakeType) {
 /// TLS 1.3 ClientHello
 pub const ClientHello = struct {
     const LEGACY_VERSION: u16 = 0x0303;
+    const RANDOM_FIELD_LEN = 32;
     const SessionId = std.BoundedArray(u8, 32);
     const CipherSuites = std.BoundedArray([2]u8, 65536 / @sizeOf([2]u8));
     const CompressionMethods = std.BoundedArray(u8, 256);
@@ -145,7 +183,33 @@ pub const ClientHello = struct {
         self.extensions.deinit();
     }
 
-    /// writes to buffer and returns write count 
+    /// get encoded bytes size
+    pub fn getEncLen(self: *const Self) usize {
+        var len: usize = blk: {
+            comptime var temp = 0;
+            temp += @sizeOf(u16); // legacy version field
+            temp += RANDOM_FIELD_LEN;
+            break :blk temp;
+        };
+
+        len += @sizeOf(u8); // session id's length field
+        len += @sizeOf(u8) * self.legacy_session_id.len;
+
+        len += @sizeOf(u16); // cipher suites' length field
+        len += @sizeOf([2]u8) * self.cipher_suites.len;
+
+        len += @sizeOf(u8); // commpression methods' length field
+        len += @sizeOf(u8) * self.legacy_compression_methods.len;
+
+        len += @sizeOf(u16); // extension length field
+        for (self.extensions.items) |*ext| {
+            len += ext.getEncLen();
+        }
+
+        return len;
+    }
+
+    /// writes to buffer and returns write count
     pub fn encode(self: *const Self, out: []u8) util.WriteError!usize {
         var offset: usize = 0;
 
@@ -186,6 +250,8 @@ pub const ClientHello = struct {
 
 pub const ServerHello = struct {};
 
+/// TLS message extensions.
+/// see https://www.rfc-editor.org/rfc/rfc8446.html#section-4.2
 pub const extension = struct {
     pub const ExtensionType = enum(u16) {
         supported_groups = 10,
@@ -209,7 +275,21 @@ pub const extension = struct {
             }
         }
 
-        /// writes to buffer and returns write count 
+        /// get encoded byte size
+        pub fn getEncLen(self: *const Self) usize {
+            var len: usize = 0;
+            len += @sizeOf(ExtensionType);
+            len += @sizeOf(u16); // content length field
+            len += switch (self.*) {
+                .supported_groups => |e| e.getEncLen(),
+                .signature_algorithms => |e| e.getEncLen(),
+                .supported_versions => |e| e.getEncLen(),
+                .key_share => |e| e.getEncLen(),
+            };
+            return len;
+        }
+
+        /// writes to buffer and returns write count
         pub fn encode(self: *const Self, out: []u8) util.WriteError!usize {
             var offset: usize = 0;
             const ext_type = @as(ExtensionType, self.*);
@@ -299,6 +379,14 @@ pub const extension = struct {
             };
         }
 
+        /// get encoded bytes size
+        pub fn getEncLen(self: *const Self) usize {
+            var len: usize = 0;
+            len += @sizeOf(u16); // length field
+            len += @sizeOf(NamedGroup) * self.named_group_list.len;
+            return len;
+        }
+
         pub fn encode(self: *const Self, out: []u8) util.WriteError!usize {
             var offset: usize = 0;
 
@@ -329,6 +417,14 @@ pub const extension = struct {
             };
         }
 
+        /// get encoded bytes size
+        pub fn getEncLen(self: *const Self) usize {
+            var len: usize = 0;
+            len += @sizeOf(u16); // length field
+            len += @sizeOf(SignatureScheme) * self.supported_algorithms.len;
+            return len;
+        }
+
         pub fn encode(self: *const Self, out: []u8) util.WriteError!usize {
             var offset: usize = 0;
             const slice = self.supported_algorithms.constSlice();
@@ -348,6 +444,17 @@ pub const extension = struct {
 
         pub fn init() Self {
             return .{};
+        }
+
+        /// get encoded bytes size
+        pub fn getEncLen(self: *const Self) usize {
+            _ = self;
+            return blk: {
+                comptime var temp = 0;
+                temp += @sizeOf(u8);
+                temp += @sizeOf(u16) * 1;
+                break :blk temp;
+            };
         }
 
         pub fn encode(self: *const Self, out: []u8) util.WriteError!usize {
@@ -387,6 +494,18 @@ pub const extension = struct {
             self.shares.deinit();
         }
 
+        /// get encoded bytes size
+        pub fn getEncLen(self: *const Self) usize {
+            var len: usize = 0;
+            len += @sizeOf(u16);
+            for (self.shares.items) |*share| {
+                len += @sizeOf(NamedGroup); // share group field
+                len += @sizeOf(u16); // share length field
+                len += share.key_exchange.items.len;
+            }
+            return len;
+        }
+
         pub fn encode(self: *const Self, out: []u8) util.WriteError!usize {
             var offset: usize = @sizeOf(u16);
             for (self.shares.items) |*share| {
@@ -398,6 +517,54 @@ pub const extension = struct {
             return offset;
         }
     };
+
+    test "Extension" {
+        var buf: [1024]u8 = undefined;
+
+        // supported groups
+        var sg = Extension{ .supported_groups = try SupportedGroups.init() };
+        defer sg.deinit();
+        const len_sg = try sg.encode(&buf);
+        try testing.expectFmt(
+            "000A00040002001D",
+            "{s}",
+            .{std.fmt.fmtSliceHexUpper(buf[0..len_sg])},
+        );
+        try testing.expectEqual(len_sg, sg.getEncLen());
+
+        // signature algorithms
+        var sa = Extension{ .signature_algorithms = try SignatureAlgorithms.init() };
+        defer sa.deinit();
+        const len_sa = try sa.encode(&buf);
+        try testing.expectFmt(
+            "000D00080006040308040401",
+            "{s}",
+            .{std.fmt.fmtSliceHexUpper(buf[0..len_sa])},
+        );
+        try testing.expectEqual(len_sa, sa.getEncLen());
+
+        // supported versions
+        var sv = Extension{ .supported_versions = SupportedVersions.init() };
+        defer sv.deinit();
+        const len_sv = try sv.encode(&buf);
+        try testing.expectFmt(
+            "002B0003020304",
+            "{s}",
+            .{std.fmt.fmtSliceHexUpper(buf[0..len_sv])},
+        );
+        try testing.expectEqual(len_sv, sv.getEncLen());
+
+        // key share
+        var ks = Extension{ .key_share = try KeyShare.init(testing.allocator) };
+        defer ks.deinit();
+        const len_ks = try ks.encode(&buf);
+        try testing.expectFmt(
+            "003300020000",
+            "{s}",
+            .{std.fmt.fmtSliceHexUpper(buf[0..len_ks])},
+        );
+        try testing.expectEqual(len_ks, ks.getEncLen());
+    }
 };
 
 test "client hello" {
@@ -423,4 +590,6 @@ test "client hello" {
         "{s}",
         .{std.fmt.fmtSliceHexUpper(after_random)},
     );
+
+    try testing.expectEqual(len, client_hello.getEncLen());
 }
