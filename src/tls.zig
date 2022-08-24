@@ -64,6 +64,7 @@ pub const TlsMessage = struct {
         };
     }
 
+    /// encode self to Buffer, buf_ptr must be a pointer to Buffer type
     pub fn encode(self: *const Self, buf_ptr: anytype) BufferError!void {
         return switch (self.*) {
             .handshake => |*m| m.encode(buf_ptr),
@@ -116,7 +117,8 @@ pub const Handshake = union(HandshakeType) {
         return len;
     }
 
-    /// implemented only for .{.client_hello} .
+    /// encode self to Buffer, buf_ptr must be a pointer to Buffer type
+    /// implemented only for .{.client_hello} now.
     pub fn encode(self: *const Self, buf_ptr: anytype) BufferError!void {
         const msg_type = @enumToInt(@as(HandshakeType, self.*));
         try buf_ptr.writer().writeIntBig(u8, msg_type);
@@ -211,7 +213,7 @@ pub const ClientHello = struct {
         return len;
     }
 
-    /// writes to buffer and returns write count
+    /// encode self to Buffer, buf_ptr must be a pointer to Buffer type
     pub fn encode(self: *const Self, buf_ptr: anytype) BufferError!void {
         // legacy_version
         try buf_ptr.writer().writeIntBig(u16, LEGACY_VERSION);
@@ -284,7 +286,7 @@ pub const extension = struct {
             return len;
         }
 
-        /// writes to buffer and returns write count
+        /// encode self to Buffer, buf_ptr must be a pointer to Buffer type
         pub fn encode(self: *const Self, buf_ptr: anytype) BufferError!void {
             const ext_type = @as(ExtensionType, self.*);
             try buf_ptr.writer().writeIntBig(u16, @enumToInt(ext_type));
@@ -382,6 +384,7 @@ pub const extension = struct {
             return len;
         }
 
+        /// encode self to Buffer, buf_ptr must be a pointer to Buffer type
         pub fn encode(self: *const Self, buf_ptr: anytype) BufferError!void {
             const slice = self.named_group_list.constSlice();
 
@@ -416,6 +419,7 @@ pub const extension = struct {
             return len;
         }
 
+        /// encode self to Buffer, buf_ptr must be a pointer to Buffer type
         pub fn encode(self: *const Self, buf_ptr: anytype) BufferError!void {
             const slice = self.supported_algorithms.constSlice();
 
@@ -446,7 +450,7 @@ pub const extension = struct {
             };
         }
 
-        /// buf must be the return type of Buffer(capacity) in buffer.zig
+        /// encode self to Buffer, buf_ptr must be a pointer to Buffer type
         pub fn encode(self: *const Self, buf_ptr: anytype) BufferError!void {
             _ = self;
             try buf_ptr.writer().writeIntBig(u8, @as(u8, @sizeOf(u16)));
@@ -494,7 +498,7 @@ pub const extension = struct {
             return len;
         }
 
-        /// buf must be the return type of Buffer(capacity) in buffer.zig
+        /// encode self to Buffer, buf_ptr must be a pointer to Buffer type
         pub fn encode(self: *const Self, buf_ptr: anytype) BufferError!void {
             var length: usize = 0;
             for (self.shares.items) |*share| {
