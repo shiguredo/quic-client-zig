@@ -9,8 +9,8 @@ const util = @import("util.zig");
 const Buffer = @import("buffer.zig").Buffer;
 const BufferError = @import("buffer.zig").BufferError;
 
-const Hmac = crypto.auth.hmac.sha2.HmacSha256;
-const Hkdf = crypto.kdf.hkdf.HkdfSha256;
+const Hmac = q_crypto.Hmac;
+const Hkdf = q_crypto.Hkdf;
 
 pub const Provider = struct {
     initial_secret: [Hmac.key_length]u8 = undefined,

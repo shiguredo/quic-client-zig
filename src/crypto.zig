@@ -2,8 +2,8 @@ const std = @import("std");
 const crypto = std.crypto;
 const testing = std.testing;
 
-const Hmac = crypto.auth.hmac.sha2.HmacSha256;
-const Hkdf = crypto.kdf.hkdf.HkdfSha256;
+pub const Hmac = crypto.auth.hmac.sha2.HmacSha256;
+pub const Hkdf = crypto.kdf.hkdf.HkdfSha256;
 
 pub const INITIAL_SALT_V1 = [_]u8{
     0x38,
