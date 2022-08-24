@@ -6,6 +6,8 @@ const testing = std.testing;
 
 const q_crypto = @import("crypto.zig");
 const util = @import("util.zig");
+const Buffer = @import("buffer.zig").Buffer;
+const BufferError = @import("buffer.zig").BufferError;
 
 const Hmac = crypto.auth.hmac.sha2.HmacSha256;
 const Hkdf = crypto.kdf.hkdf.HkdfSha256;
@@ -62,9 +64,9 @@ pub const TlsMessage = struct {
         };
     }
 
-    pub fn encode(self: *const Self, out: []u8) util.WriteError!usize {
+    pub fn encode(self: *const Self, buf: anytype) BufferError!void {
         return switch (self.*) {
-            .handshake => |*m| m.encode(out),
+            .handshake => |*m| m.encode(buf),
         };
     }
 };
@@ -115,22 +117,22 @@ pub const Handshake = union(HandshakeType) {
     }
 
     /// implemented only for .{.client_hello} .
-    pub fn encode(self: *const Self, out: []u8) util.WriteError!usize {
-        var offset: usize = 0;
+    pub fn encode(self: *const Self, buf: anytype) BufferError!void {
         const msg_type = @enumToInt(@as(HandshakeType, self.*));
-        offset += try util.writeIntReturnSize(u8, out[offset..], msg_type);
+        try buf.writer().writeIntBig(u8, msg_type);
 
-        const len_pos = offset;
-
-        offset += @as(usize, @bitSizeOf(u24) / 8);
-        const len = switch (self.*) {
-            .client_hello => |c_hello| try c_hello.encode(out[offset..]),
-            .server_hello => 0, // TODO: inmplement for server hello
+        const length = switch (self.*) {
+            .client_hello => |*c_hello| c_hello.getEncLen(),
+            else => 0 // TODO: inmplement for server hello
         };
+        try buf.writer().writeIntBig(u24, @intCast(u24, length));
 
-        _ = try util.writeIntReturnSize(u24, out[len_pos .. len_pos + 3], @intCast(u24, len));
+        switch (self.*) {
+            .client_hello => |c_hello| try c_hello.encode(buf),
+            .server_hello => {}, // TODO: inmplement for server hello
+        }
 
-        return offset + len;
+        return;
     }
 };
 
@@ -210,41 +212,34 @@ pub const ClientHello = struct {
     }
 
     /// writes to buffer and returns write count
-    pub fn encode(self: *const Self, out: []u8) util.WriteError!usize {
-        var offset: usize = 0;
-
+    pub fn encode(self: *const Self, buf: anytype) BufferError!void {
         // legacy_version
-        offset += try util.writeIntReturnSize(u16, out[offset..], LEGACY_VERSION);
+        try buf.writer().writeIntBig(u16, LEGACY_VERSION);
 
         // ramdom
-        offset += try util.copyReturnSize(out[offset..], &self.random_bytes);
+        _ = try buf.writer().write(&self.random_bytes);
 
         // legacy_session_id
-        offset += try util.writeIntReturnSize(u8, out[offset..], @intCast(u8, self.legacy_session_id.len));
-        offset += try util.copyReturnSize(out[offset..], self.legacy_session_id.constSlice());
+        try buf.writer().writeIntBig(u8, @intCast(u8, self.legacy_session_id.len));
+        _ = try buf.writer().write(self.legacy_session_id.constSlice());
 
         // cipher_suites
         const suites_byte_ptr = mem.sliceAsBytes(self.cipher_suites.constSlice());
-        offset += try util.writeIntReturnSize(u16, out[offset..], @intCast(u16, suites_byte_ptr.len));
-        offset += try util.copyReturnSize(out[offset..], suites_byte_ptr);
+        try buf.writer().writeIntBig(u16, @intCast(u16, suites_byte_ptr.len));
+        _ = try buf.writer().write(suites_byte_ptr);
 
         // legacy_compression_methods
-        offset += try util.writeIntReturnSize(u8, out[offset..], @intCast(u8, self.legacy_compression_methods.len));
-        offset += try util.copyReturnSize(out[offset..], self.legacy_compression_methods.constSlice());
+        try buf.writer().writeIntBig(u8, @intCast(u8, self.legacy_compression_methods.len));
+        _ = try buf.writer().write(self.legacy_compression_methods.constSlice());
 
         // extensions
-        const ext_len_offset = offset;
-        offset += @as(usize, @sizeOf(u16));
         var ext_total_len: usize = 0;
-        for (self.extensions.items) |*ext| {
-            const ext_len = try ext.encode(out[offset..]);
-            offset += ext_len;
-            ext_total_len += ext_len;
-        }
-        // write sum of extension len
-        _ = try util.writeIntReturnSize(u16, out[ext_len_offset .. ext_len_offset + @sizeOf(u16)], @intCast(u16, ext_total_len));
+        for (self.extensions.items) |*ext| ext_total_len += ext.getEncLen();
+        try buf.writer().writeIntBig(u16, @intCast(u16, ext_total_len));
 
-        return offset;
+        for (self.extensions.items) |*ext| try ext.encode(buf);
+
+        return;
     }
 };
 
@@ -290,24 +285,24 @@ pub const extension = struct {
         }
 
         /// writes to buffer and returns write count
-        pub fn encode(self: *const Self, out: []u8) util.WriteError!usize {
-            var offset: usize = 0;
+        pub fn encode(self: *const Self, buf: anytype) BufferError!void {
             const ext_type = @as(ExtensionType, self.*);
-            offset += try util.writeIntReturnSize(u16, out[offset..], @enumToInt(ext_type));
-            const len_pos = offset;
-            offset += @as(usize, @sizeOf(u16));
+            try buf.writer().writeIntBig(u16, @enumToInt(ext_type));
 
-            var data_field_out = out[offset..];
-            const data_len = try switch (self.*) {
-                .supported_groups => |e| e.encode(data_field_out),
-                .signature_algorithms => |e| e.encode(data_field_out),
-                .supported_versions => |e| e.encode(data_field_out),
-                .key_share => |e| e.encode(data_field_out),
+            const data_len = switch (self.*) {
+                .supported_groups => |e| e.getEncLen(),
+                .signature_algorithms => |e| e.getEncLen(),
+                .supported_versions => |e| e.getEncLen(),
+                .key_share => |e| e.getEncLen(),
             };
+            try buf.writer().writeIntBig(u16, @intCast(u16, data_len));
 
-            _ = try util.writeIntReturnSize(u16, out[len_pos .. len_pos + @sizeOf(u16)], @intCast(u16, data_len));
-
-            return len_pos + data_len + @as(usize, @sizeOf(u16));
+            try switch (self.*) {
+                .supported_groups => |e| e.encode(buf),
+                .signature_algorithms => |e| e.encode(buf),
+                .supported_versions => |e| e.encode(buf),
+                .key_share => |e| e.encode(buf),
+            };
         }
     };
 
@@ -387,17 +382,13 @@ pub const extension = struct {
             return len;
         }
 
-        pub fn encode(self: *const Self, out: []u8) util.WriteError!usize {
-            var offset: usize = 0;
-
+        pub fn encode(self: *const Self, buf: anytype) BufferError!void {
             const slice = self.named_group_list.constSlice();
 
-            offset += try util.writeIntReturnSize(u16, out[offset..], @intCast(u16, slice.len * 2));
+            try buf.writer().writeIntBig(u16, @intCast(u16, slice.len * 2));
             for (slice) |group| {
-                offset += try util.writeIntReturnSize(u16, out[offset..], @enumToInt(group));
+                try buf.writer().writeIntBig(u16, @enumToInt(group));
             }
-
-            return offset;
         }
     };
 
@@ -425,15 +416,13 @@ pub const extension = struct {
             return len;
         }
 
-        pub fn encode(self: *const Self, out: []u8) util.WriteError!usize {
-            var offset: usize = 0;
+        pub fn encode(self: *const Self, buf: anytype) BufferError!void {
             const slice = self.supported_algorithms.constSlice();
 
-            offset += try util.writeIntReturnSize(u16, out[offset..], @intCast(u16, slice.len * @sizeOf(u16)));
+            try buf.writer().writeIntBig(u16, @intCast(u16, slice.len * @sizeOf(u16)));
             for (slice) |algo| {
-                offset += try util.writeIntReturnSize(u16, out[offset..], @enumToInt(algo));
+                try buf.writer().writeIntBig(u16, @enumToInt(algo));
             }
-            return offset;
         }
     };
 
@@ -457,12 +446,11 @@ pub const extension = struct {
             };
         }
 
-        pub fn encode(self: *const Self, out: []u8) util.WriteError!usize {
+        /// buf must be the return type of Buffer(capacity) in buffer.zig
+        pub fn encode(self: *const Self, buf: anytype) BufferError!void {
             _ = self;
-            var offset: usize = 0;
-            offset += try util.writeIntReturnSize(u8, out[offset..], @as(u8, @sizeOf(u16)));
-            offset += try util.writeIntReturnSize(u16, out[offset..], @as(u16, TLS13));
-            return offset;
+            try buf.writer().writeIntBig(u8, @as(u8, @sizeOf(u16)));
+            try buf.writer().writeIntBig(u16, @as(u16, TLS13));
         }
     };
 
@@ -506,75 +494,84 @@ pub const extension = struct {
             return len;
         }
 
-        pub fn encode(self: *const Self, out: []u8) util.WriteError!usize {
-            var offset: usize = @sizeOf(u16);
+        /// buf must be the return type of Buffer(capacity) in buffer.zig
+        pub fn encode(self: *const Self, buf: anytype) BufferError!void {
+            var length: usize = 0;
             for (self.shares.items) |*share| {
-                offset += try util.writeIntReturnSize(u16, out[offset..], @enumToInt(share.group));
-                offset += try util.writeIntReturnSize(u16, out[offset..], @intCast(u16, self.shares.items.len));
-                offset += try util.copyReturnSize(out[offset..], share.key_exchange.items);
+                length += @sizeOf(u16) * 2;
+                length += share.key_exchange.items.len;
             }
-            _ = try util.writeIntReturnSize(u16, out[0..], @intCast(u16, offset - @as(usize, @sizeOf(u16))));
-            return offset;
+            try buf.writer().writeIntBig(u16, @intCast(u16, length));
+
+            for (self.shares.items) |*share| {
+                try buf.writer().writeIntBig(u16, @enumToInt(share.group));
+                try buf.writer().writeIntBig(u16, @intCast(u16, self.shares.items.len));
+                _ = try buf.writer().write(share.key_exchange.items);
+            }
         }
     };
 
     test "Extension" {
-        var buf: [1024]u8 = undefined;
+        var buf = Buffer(1024).init();
 
         // supported groups
         var sg = Extension{ .supported_groups = try SupportedGroups.init() };
         defer sg.deinit();
-        const len_sg = try sg.encode(&buf);
+        try sg.encode(&buf);
         try testing.expectFmt(
             "000A00040002001D",
             "{s}",
-            .{std.fmt.fmtSliceHexUpper(buf[0..len_sg])},
+            .{std.fmt.fmtSliceHexUpper(buf.getUnreadSlice())},
         );
-        try testing.expectEqual(len_sg, sg.getEncLen());
+        try testing.expectEqual(buf.unreadLength(), sg.getEncLen());
 
         // signature algorithms
+        buf.clear();
         var sa = Extension{ .signature_algorithms = try SignatureAlgorithms.init() };
         defer sa.deinit();
-        const len_sa = try sa.encode(&buf);
+        try sa.encode(&buf);
         try testing.expectFmt(
             "000D00080006040308040401",
             "{s}",
-            .{std.fmt.fmtSliceHexUpper(buf[0..len_sa])},
+            .{std.fmt.fmtSliceHexUpper(buf.getUnreadSlice())},
         );
-        try testing.expectEqual(len_sa, sa.getEncLen());
+        try testing.expectEqual(buf.unreadLength(), sa.getEncLen());
 
         // supported versions
+        buf.clear();
         var sv = Extension{ .supported_versions = SupportedVersions.init() };
         defer sv.deinit();
-        const len_sv = try sv.encode(&buf);
+        try sv.encode(&buf);
         try testing.expectFmt(
             "002B0003020304",
             "{s}",
-            .{std.fmt.fmtSliceHexUpper(buf[0..len_sv])},
+            .{std.fmt.fmtSliceHexUpper(buf.getUnreadSlice())},
         );
-        try testing.expectEqual(len_sv, sv.getEncLen());
+        try testing.expectEqual(buf.unreadLength(), sv.getEncLen());
 
         // key share
+        buf.clear();
         var ks = Extension{ .key_share = try KeyShare.init(testing.allocator) };
         defer ks.deinit();
-        const len_ks = try ks.encode(&buf);
+        try ks.encode(&buf);
         try testing.expectFmt(
             "003300020000",
             "{s}",
-            .{std.fmt.fmtSliceHexUpper(buf[0..len_ks])},
+            .{std.fmt.fmtSliceHexUpper(buf.getUnreadSlice())},
         );
-        try testing.expectEqual(len_ks, ks.getEncLen());
+        try testing.expectEqual(buf.unreadLength(), ks.getEncLen());
     }
 };
 
 test "client hello" {
     var client_hello = try Handshake.initClient(testing.allocator);
     defer client_hello.deinit();
-    var buf: [65536]u8 = undefined;
-    const len = try client_hello.encode(&buf);
-    const before_random = buf[0..6];
-    const after_random = buf[6 + 32 .. len];
-    try testing.expectEqual(@as(u8, 0x01), buf[0]); // handshake type "ClientHello"
+    var buf = Buffer(1024).init();
+    try client_hello.encode(&buf);
+    const len = buf.unreadLength();
+    const before_random = buf.getUnreadSlice()[0..6];
+    const after_random = buf.getUnreadSlice()[6 + 32 .. len];
+    try testing.expectEqual(@as(u8, 0x01), buf.getUnreadSlice()[0]); // handshake type "ClientHello"
     try testing.expectEqual(len - 4, @intCast(usize, mem.readInt(u24, before_random[1..4], .Big))); // length field of handshake
     try testing.expectEqual(@as(u16, 0x0303), mem.readInt(u16, before_random[4..6], .Big)); // legacy_version == 0x0303
 
