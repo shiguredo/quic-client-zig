@@ -64,9 +64,9 @@ pub const TlsMessage = struct {
         };
     }
 
-    pub fn encode(self: *const Self, buf: anytype) BufferError!void {
+    pub fn encode(self: *const Self, buf_ptr: anytype) BufferError!void {
         return switch (self.*) {
-            .handshake => |*m| m.encode(buf),
+            .handshake => |*m| m.encode(buf_ptr),
         };
     }
 };
@@ -117,18 +117,18 @@ pub const Handshake = union(HandshakeType) {
     }
 
     /// implemented only for .{.client_hello} .
-    pub fn encode(self: *const Self, buf: anytype) BufferError!void {
+    pub fn encode(self: *const Self, buf_ptr: anytype) BufferError!void {
         const msg_type = @enumToInt(@as(HandshakeType, self.*));
-        try buf.writer().writeIntBig(u8, msg_type);
+        try buf_ptr.writer().writeIntBig(u8, msg_type);
 
         const length = switch (self.*) {
             .client_hello => |*c_hello| c_hello.getEncLen(),
             else => 0 // TODO: inmplement for server hello
         };
-        try buf.writer().writeIntBig(u24, @intCast(u24, length));
+        try buf_ptr.writer().writeIntBig(u24, @intCast(u24, length));
 
         switch (self.*) {
-            .client_hello => |c_hello| try c_hello.encode(buf),
+            .client_hello => |c_hello| try c_hello.encode(buf_ptr),
             .server_hello => {}, // TODO: inmplement for server hello
         }
 
@@ -212,32 +212,32 @@ pub const ClientHello = struct {
     }
 
     /// writes to buffer and returns write count
-    pub fn encode(self: *const Self, buf: anytype) BufferError!void {
+    pub fn encode(self: *const Self, buf_ptr: anytype) BufferError!void {
         // legacy_version
-        try buf.writer().writeIntBig(u16, LEGACY_VERSION);
+        try buf_ptr.writer().writeIntBig(u16, LEGACY_VERSION);
 
         // ramdom
-        _ = try buf.writer().write(&self.random_bytes);
+        _ = try buf_ptr.writer().write(&self.random_bytes);
 
         // legacy_session_id
-        try buf.writer().writeIntBig(u8, @intCast(u8, self.legacy_session_id.len));
-        _ = try buf.writer().write(self.legacy_session_id.constSlice());
+        try buf_ptr.writer().writeIntBig(u8, @intCast(u8, self.legacy_session_id.len));
+        _ = try buf_ptr.writer().write(self.legacy_session_id.constSlice());
 
         // cipher_suites
         const suites_byte_ptr = mem.sliceAsBytes(self.cipher_suites.constSlice());
-        try buf.writer().writeIntBig(u16, @intCast(u16, suites_byte_ptr.len));
-        _ = try buf.writer().write(suites_byte_ptr);
+        try buf_ptr.writer().writeIntBig(u16, @intCast(u16, suites_byte_ptr.len));
+        _ = try buf_ptr.writer().write(suites_byte_ptr);
 
         // legacy_compression_methods
-        try buf.writer().writeIntBig(u8, @intCast(u8, self.legacy_compression_methods.len));
-        _ = try buf.writer().write(self.legacy_compression_methods.constSlice());
+        try buf_ptr.writer().writeIntBig(u8, @intCast(u8, self.legacy_compression_methods.len));
+        _ = try buf_ptr.writer().write(self.legacy_compression_methods.constSlice());
 
         // extensions
         var ext_total_len: usize = 0;
         for (self.extensions.items) |*ext| ext_total_len += ext.getEncLen();
-        try buf.writer().writeIntBig(u16, @intCast(u16, ext_total_len));
+        try buf_ptr.writer().writeIntBig(u16, @intCast(u16, ext_total_len));
 
-        for (self.extensions.items) |*ext| try ext.encode(buf);
+        for (self.extensions.items) |*ext| try ext.encode(buf_ptr);
 
         return;
     }
@@ -285,9 +285,9 @@ pub const extension = struct {
         }
 
         /// writes to buffer and returns write count
-        pub fn encode(self: *const Self, buf: anytype) BufferError!void {
+        pub fn encode(self: *const Self, buf_ptr: anytype) BufferError!void {
             const ext_type = @as(ExtensionType, self.*);
-            try buf.writer().writeIntBig(u16, @enumToInt(ext_type));
+            try buf_ptr.writer().writeIntBig(u16, @enumToInt(ext_type));
 
             const data_len = switch (self.*) {
                 .supported_groups => |e| e.getEncLen(),
@@ -295,13 +295,13 @@ pub const extension = struct {
                 .supported_versions => |e| e.getEncLen(),
                 .key_share => |e| e.getEncLen(),
             };
-            try buf.writer().writeIntBig(u16, @intCast(u16, data_len));
+            try buf_ptr.writer().writeIntBig(u16, @intCast(u16, data_len));
 
             try switch (self.*) {
-                .supported_groups => |e| e.encode(buf),
-                .signature_algorithms => |e| e.encode(buf),
-                .supported_versions => |e| e.encode(buf),
-                .key_share => |e| e.encode(buf),
+                .supported_groups => |e| e.encode(buf_ptr),
+                .signature_algorithms => |e| e.encode(buf_ptr),
+                .supported_versions => |e| e.encode(buf_ptr),
+                .key_share => |e| e.encode(buf_ptr),
             };
         }
     };
@@ -382,12 +382,12 @@ pub const extension = struct {
             return len;
         }
 
-        pub fn encode(self: *const Self, buf: anytype) BufferError!void {
+        pub fn encode(self: *const Self, buf_ptr: anytype) BufferError!void {
             const slice = self.named_group_list.constSlice();
 
-            try buf.writer().writeIntBig(u16, @intCast(u16, slice.len * 2));
+            try buf_ptr.writer().writeIntBig(u16, @intCast(u16, slice.len * 2));
             for (slice) |group| {
-                try buf.writer().writeIntBig(u16, @enumToInt(group));
+                try buf_ptr.writer().writeIntBig(u16, @enumToInt(group));
             }
         }
     };
@@ -416,12 +416,12 @@ pub const extension = struct {
             return len;
         }
 
-        pub fn encode(self: *const Self, buf: anytype) BufferError!void {
+        pub fn encode(self: *const Self, buf_ptr: anytype) BufferError!void {
             const slice = self.supported_algorithms.constSlice();
 
-            try buf.writer().writeIntBig(u16, @intCast(u16, slice.len * @sizeOf(u16)));
+            try buf_ptr.writer().writeIntBig(u16, @intCast(u16, slice.len * @sizeOf(u16)));
             for (slice) |algo| {
-                try buf.writer().writeIntBig(u16, @enumToInt(algo));
+                try buf_ptr.writer().writeIntBig(u16, @enumToInt(algo));
             }
         }
     };
@@ -447,10 +447,10 @@ pub const extension = struct {
         }
 
         /// buf must be the return type of Buffer(capacity) in buffer.zig
-        pub fn encode(self: *const Self, buf: anytype) BufferError!void {
+        pub fn encode(self: *const Self, buf_ptr: anytype) BufferError!void {
             _ = self;
-            try buf.writer().writeIntBig(u8, @as(u8, @sizeOf(u16)));
-            try buf.writer().writeIntBig(u16, @as(u16, TLS13));
+            try buf_ptr.writer().writeIntBig(u8, @as(u8, @sizeOf(u16)));
+            try buf_ptr.writer().writeIntBig(u16, @as(u16, TLS13));
         }
     };
 
@@ -495,18 +495,18 @@ pub const extension = struct {
         }
 
         /// buf must be the return type of Buffer(capacity) in buffer.zig
-        pub fn encode(self: *const Self, buf: anytype) BufferError!void {
+        pub fn encode(self: *const Self, buf_ptr: anytype) BufferError!void {
             var length: usize = 0;
             for (self.shares.items) |*share| {
                 length += @sizeOf(u16) * 2;
                 length += share.key_exchange.items.len;
             }
-            try buf.writer().writeIntBig(u16, @intCast(u16, length));
+            try buf_ptr.writer().writeIntBig(u16, @intCast(u16, length));
 
             for (self.shares.items) |*share| {
-                try buf.writer().writeIntBig(u16, @enumToInt(share.group));
-                try buf.writer().writeIntBig(u16, @intCast(u16, self.shares.items.len));
-                _ = try buf.writer().write(share.key_exchange.items);
+                try buf_ptr.writer().writeIntBig(u16, @enumToInt(share.group));
+                try buf_ptr.writer().writeIntBig(u16, @intCast(u16, self.shares.items.len));
+                _ = try buf_ptr.writer().write(share.key_exchange.items);
             }
         }
     };
