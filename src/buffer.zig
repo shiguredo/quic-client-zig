@@ -1,57 +1,128 @@
 const std = @import("std");
 const testing = std.testing;
-const allocator = std.heap.page_allocator;
+const mem = std.mem;
+const io = std.io;
 
-pub const BufferError = error {
-    OutOfRangeError,
+pub const BufferError = error{
+    NotEnoughRemainCapacity,
 };
 
-pub const Buffer = struct {
-    array: []u8,
-    offset: usize,
-    size: usize,
+/// return struct that have internal u8 array, read_pos and write_pos.
+/// Using read/write methods of this struct adds
+/// the number of bytes count read/written to read_pos/write_pos
+pub fn Buffer(comptime capacity: comptime_int) type {
+    return struct {
+        array: [capacity]u8,
+        write_pos: usize,
+        read_pos: usize,
 
-    const Self = @This();
+        const Self = @This();
 
-    pub fn init(size: usize) !Self {
-        const array = try allocator.alloc(u8, size);
-        const new_buffer: Self = .{
-            .array = array,
-            .offset = 0,
-            .size = size,
-        };
-        return new_buffer;
-    }
+        const Reader = io.Reader(*Self, BufferError, read);
+        const Writer = io.Writer(*Self, BufferError, write);
 
-    pub fn deinit(self: *Self) void {
-        self.offset = 0;
-        self.size = 0;
-        allocator.free(self.array);
-    }
+        pub fn init() Self {
+            return .{ .array = undefined, .write_pos = 0, .read_pos = 0 };
+        }
 
-    pub fn getSlice(self: *Self) []u8 {
-        return self.array;
-    }
+        /// read bytes as much as possible
+        pub fn read(self: *Self, out: []u8) BufferError!usize {
+            const unread = self.getUnreadSlice();
+            if (out.len > unread.len)
+                mem.copy(u8, out, unread)
+            else
+                mem.copy(u8, out, unread[0..out.len]);
+            const count = std.math.min(out.len, unread.len);
+            self.read_pos += count;
+            return count;
+        }
 
-    pub fn getOffsetSlice(self: *Self, offset: usize) BufferError![]u8 {
-        const total_offset = self.offset + offset;
-        if (total_offset < 0 or total_offset >= self.size) return BufferError.OutOfRangeError;
+        pub fn reader(self: *Self) Reader {
+            return .{ .context = self };
+        }
 
-        return self.array[total_offset..];
-    }
-};
+        /// write all bytes from input
+        /// if self.array doesn't have enough capacity to write,
+        /// return BufferError.NotEnoughRemainCapacity
+        pub fn write(self: *Self, input: []const u8) BufferError!usize {
+            const unwritten = self.getUnwrittenSlice();
+            if (input.len > unwritten.len)
+                return BufferError.NotEnoughRemainCapacity
+            else
+                mem.copy(u8, unwritten, input);
+            self.write_pos += input.len;
+            return input.len;
+        }
 
-test "buffer test" {
-    var buf = try Buffer.init(1 << 10);
-    defer buf.deinit();
+        pub fn writer(self: *Self) Writer {
+            return .{ .context = self };
+        }
 
-    var buf2 = try Buffer.init(1 << 20);
-    defer buf2.deinit();
+        pub fn getSlice(self: *Self) []u8 {
+            return &self.array;
+        }
+
+        pub fn getConstSlice(self: *const Self) []const u8 {
+            return &self.array;
+        }
+
+        /// return IMMUTABLE slice in range self.read_pos .. self.write_pos
+        pub fn getUnreadSlice(self: *const Self) []const u8 {
+            return self.array[self.read_pos..self.write_pos];
+        }
+
+        pub fn unreadLength(self: *const Self) usize {
+            const unread_count = self.write_pos - self.read_pos;
+            std.debug.assert(unread_count >= 0);
+            return unread_count;
+        }
+
+        pub fn getUnwrittenSlice(self: *Self) []u8 {
+            return self.array[self.write_pos..];
+        }
+
+        pub fn unwrittenLength(self: *const Self) usize {
+            const unwritten_count = self.array.len - self.write_pos;
+            std.debug.assert(unwritten_count >= 0);
+            return unwritten_count;
+        }
+
+        pub fn clear(self: *Self) void {
+            self.read_pos = 0;
+            self.write_pos = 0;
+        }
+    };
 }
 
-test "get offset slice" {
-    var buf = try Buffer.init(1 << 16);
-    defer buf.deinit();
+test "Buffer reader and writer" {
+    const Buffer32 = Buffer(32);
+    var buf = Buffer32.init();
+    try testing.expectEqual(@as(usize, 0), buf.unreadLength());
+    try testing.expectEqual(@as(usize, 32), buf.unwrittenLength());
 
-    try testing.expectError(BufferError.OutOfRangeError, buf.getOffsetSlice(1<<20));
+    const array1 = [_]u8{ 0x00, 0x01, 0x02, 0x03, 0x04, 0x05 };
+    const array2 = [_]u8{ 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F };
+
+    const w_cnt1 = try buf.writer().write(&array1);
+    const a = try buf.reader().readInt(u32, .Big);
+    try testing.expectEqual(@as(usize, 6), w_cnt1);
+    try testing.expectEqual(@as(u32, 0x00010203), a);
+
+    const w_cnt2 = try buf.writer().write(&array2);
+    var b: [12]u8 = undefined;
+    const b_count = try buf.reader().read(&b);
+    try testing.expectEqual(@as(usize, 6), w_cnt2);
+    try testing.expectFmt(
+        "04050A0B0C0D0E0F",
+        "{s}",
+        .{std.fmt.fmtSliceHexUpper(b[0..b_count])},
+    );
+
+    try testing.expectEqual(@as(usize, 8), b_count);
+    try testing.expectEqual(@as(usize, 0), buf.unreadLength());
+    try testing.expectEqual(@as(usize, 20), buf.unwrittenLength());
+
+    buf.clear();
+    try testing.expectEqual(@as(usize, 0), buf.unreadLength());
+    try testing.expectEqual(@as(usize, 32), buf.unwrittenLength());
 }
