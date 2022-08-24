@@ -123,7 +123,7 @@ pub const Handshake = union(HandshakeType) {
 
         const length = switch (self.*) {
             .client_hello => |*c_hello| c_hello.getEncLen(),
-            else => 0 // TODO: inmplement for server hello
+            else => 0, // TODO: inmplement for server hello
         };
         try buf_ptr.writer().writeIntBig(u24, @intCast(u24, length));
 
@@ -575,18 +575,20 @@ test "client hello" {
     try testing.expectEqual(len - 4, @intCast(usize, mem.readInt(u24, before_random[1..4], .Big))); // length field of handshake
     try testing.expectEqual(@as(u16, 0x0303), mem.readInt(u16, before_random[4..6], .Big)); // legacy_version == 0x0303
 
+    // zig fmt: off
     try testing.expectFmt(
-        ("00" ++ // legacy_session_id
-            "00021301" ++ // cipher_suites
-            "0100" ++ // legacy_compression_id
-            "0021" ++ // extension field length
-            "000A00040002001D" ++ // supported_groups
-            "000D00080006040308040401" ++ // sigunature_algorithms
-            "002B0003020304" ++ // supported_versions
-            "003300020000"), // key_share
+        "00" ++ // legacy_session_id
+        "00021301" ++ // cipher_suites
+        "0100" ++ // legacy_compression_id
+        "0021" ++ // extension field length
+        "000A00040002001D" ++ // supported_groups
+        "000D00080006040308040401" ++ // sigunature_algorithms
+        "002B0003020304" ++ // supported_versions
+        "003300020000", // key_share
         "{s}",
         .{std.fmt.fmtSliceHexUpper(after_random)},
     );
+    // zig fmt: on
 
     try testing.expectEqual(len, client_hello.getEncLen());
 }
