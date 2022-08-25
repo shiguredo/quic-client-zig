@@ -7,28 +7,6 @@ const buffer = @import("buffer.zig");
 const Buffer = buffer.Buffer;
 const BufferError = buffer.BufferError;
 
-pub const WriteError = error{
-    BufferTooShort,
-};
-
-/// write value in BIG ENDIAN and returns written byte count
-pub fn writeIntReturnSize(comptime T: type, dst: []u8, value: T) WriteError!usize {
-    const write_size = @as(usize, @bitSizeOf(T) / 8);
-    if (dst.len < write_size) return WriteError.BufferTooShort;
-
-    std.mem.writeInt(T, dst[0..write_size], value, .Big);
-    return write_size;
-}
-
-/// copy buffer with offset and returns written byte count
-pub fn copyReturnSize(dst: []u8, source: []const u8) WriteError!usize {
-    if (dst.len < source.len) return WriteError.BufferTooShort;
-
-    const len = source.len;
-    std.mem.copy(u8, dst[0..len], source);
-    return len;
-}
-
 /// implementation for Variable-Length Interger
 /// https://www.rfc-editor.org/rfc/rfc9000.html#name-variable-length-integer-enc
 pub const VariableLengthInt = struct {
