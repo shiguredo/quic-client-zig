@@ -4,3 +4,6 @@ zig-out/
 build/
 build-*/
 docgen_tmp/
+
+# python
+venv/
