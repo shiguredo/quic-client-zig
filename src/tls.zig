@@ -64,10 +64,10 @@ pub const TlsMessage = struct {
         };
     }
 
-    /// encode self to Buffer, buf_ptr must be a pointer to Buffer type
-    pub fn encode(self: *const Self, buf_ptr: anytype) BufferError!void {
+    /// encode self to writer
+    pub fn encode(self: *const Self, writer: anytype) BufferError!void {
         return switch (self.*) {
-            .handshake => |*m| m.encode(buf_ptr),
+            .handshake => |*m| m.encode(writer),
         };
     }
 };
@@ -117,20 +117,20 @@ pub const Handshake = union(HandshakeType) {
         return len;
     }
 
-    /// encode self to Buffer, buf_ptr must be a pointer to Buffer type
+    /// encode self to writer
     /// implemented only for .{.client_hello} now.
-    pub fn encode(self: *const Self, buf_ptr: anytype) BufferError!void {
+    pub fn encode(self: *const Self, writer: anytype) BufferError!void {
         const msg_type = @enumToInt(@as(HandshakeType, self.*));
-        try buf_ptr.writer().writeIntBig(u8, msg_type);
+        try writer.writeIntBig(u8, msg_type);
 
         const length = switch (self.*) {
             .client_hello => |*c_hello| c_hello.getEncLen(),
             else => 0, // TODO: inmplement for server hello
         };
-        try buf_ptr.writer().writeIntBig(u24, @intCast(u24, length));
+        try writer.writeIntBig(u24, @intCast(u24, length));
 
         switch (self.*) {
-            .client_hello => |c_hello| try c_hello.encode(buf_ptr),
+            .client_hello => |c_hello| try c_hello.encode(writer),
             .server_hello => {}, // TODO: inmplement for server hello
         }
 
@@ -213,33 +213,33 @@ pub const ClientHello = struct {
         return len;
     }
 
-    /// encode self to Buffer, buf_ptr must be a pointer to Buffer type
-    pub fn encode(self: *const Self, buf_ptr: anytype) BufferError!void {
+    /// encode self to writer
+    pub fn encode(self: *const Self, writer: anytype) BufferError!void {
         // legacy_version
-        try buf_ptr.writer().writeIntBig(u16, LEGACY_VERSION);
+        try writer.writeIntBig(u16, LEGACY_VERSION);
 
         // ramdom
-        _ = try buf_ptr.writer().write(&self.random_bytes);
+        _ = try writer.write(&self.random_bytes);
 
         // legacy_session_id
-        try buf_ptr.writer().writeIntBig(u8, @intCast(u8, self.legacy_session_id.len));
-        _ = try buf_ptr.writer().write(self.legacy_session_id.constSlice());
+        try writer.writeIntBig(u8, @intCast(u8, self.legacy_session_id.len));
+        _ = try writer.write(self.legacy_session_id.constSlice());
 
         // cipher_suites
         const suites_byte_ptr = mem.sliceAsBytes(self.cipher_suites.constSlice());
-        try buf_ptr.writer().writeIntBig(u16, @intCast(u16, suites_byte_ptr.len));
-        _ = try buf_ptr.writer().write(suites_byte_ptr);
+        try writer.writeIntBig(u16, @intCast(u16, suites_byte_ptr.len));
+        _ = try writer.write(suites_byte_ptr);
 
         // legacy_compression_methods
-        try buf_ptr.writer().writeIntBig(u8, @intCast(u8, self.legacy_compression_methods.len));
-        _ = try buf_ptr.writer().write(self.legacy_compression_methods.constSlice());
+        try writer.writeIntBig(u8, @intCast(u8, self.legacy_compression_methods.len));
+        _ = try writer.write(self.legacy_compression_methods.constSlice());
 
         // extensions
         var ext_total_len: usize = 0;
         for (self.extensions.items) |*ext| ext_total_len += ext.getEncLen();
-        try buf_ptr.writer().writeIntBig(u16, @intCast(u16, ext_total_len));
+        try writer.writeIntBig(u16, @intCast(u16, ext_total_len));
 
-        for (self.extensions.items) |*ext| try ext.encode(buf_ptr);
+        for (self.extensions.items) |*ext| try ext.encode(writer);
 
         return;
     }
@@ -286,10 +286,10 @@ pub const extension = struct {
             return len;
         }
 
-        /// encode self to Buffer, buf_ptr must be a pointer to Buffer type
-        pub fn encode(self: *const Self, buf_ptr: anytype) BufferError!void {
+        /// encode self to writer
+        pub fn encode(self: *const Self, writer: anytype) BufferError!void {
             const ext_type = @as(ExtensionType, self.*);
-            try buf_ptr.writer().writeIntBig(u16, @enumToInt(ext_type));
+            try writer.writeIntBig(u16, @enumToInt(ext_type));
 
             const data_len = switch (self.*) {
                 .supported_groups => |e| e.getEncLen(),
@@ -297,13 +297,13 @@ pub const extension = struct {
                 .supported_versions => |e| e.getEncLen(),
                 .key_share => |e| e.getEncLen(),
             };
-            try buf_ptr.writer().writeIntBig(u16, @intCast(u16, data_len));
+            try writer.writeIntBig(u16, @intCast(u16, data_len));
 
             try switch (self.*) {
-                .supported_groups => |e| e.encode(buf_ptr),
-                .signature_algorithms => |e| e.encode(buf_ptr),
-                .supported_versions => |e| e.encode(buf_ptr),
-                .key_share => |e| e.encode(buf_ptr),
+                .supported_groups => |e| e.encode(writer),
+                .signature_algorithms => |e| e.encode(writer),
+                .supported_versions => |e| e.encode(writer),
+                .key_share => |e| e.encode(writer),
             };
         }
     };
@@ -384,13 +384,13 @@ pub const extension = struct {
             return len;
         }
 
-        /// encode self to Buffer, buf_ptr must be a pointer to Buffer type
-        pub fn encode(self: *const Self, buf_ptr: anytype) BufferError!void {
+        /// encode self to to writer
+        pub fn encode(self: *const Self, writer: anytype) BufferError!void {
             const slice = self.named_group_list.constSlice();
 
-            try buf_ptr.writer().writeIntBig(u16, @intCast(u16, slice.len * 2));
+            try writer.writeIntBig(u16, @intCast(u16, slice.len * 2));
             for (slice) |group| {
-                try buf_ptr.writer().writeIntBig(u16, @enumToInt(group));
+                try writer.writeIntBig(u16, @enumToInt(group));
             }
         }
     };
@@ -419,13 +419,13 @@ pub const extension = struct {
             return len;
         }
 
-        /// encode self to Buffer, buf_ptr must be a pointer to Buffer type
-        pub fn encode(self: *const Self, buf_ptr: anytype) BufferError!void {
+        /// encode self to writer
+        pub fn encode(self: *const Self, writer: anytype) BufferError!void {
             const slice = self.supported_algorithms.constSlice();
 
-            try buf_ptr.writer().writeIntBig(u16, @intCast(u16, slice.len * @sizeOf(u16)));
+            try writer.writeIntBig(u16, @intCast(u16, slice.len * @sizeOf(u16)));
             for (slice) |algo| {
-                try buf_ptr.writer().writeIntBig(u16, @enumToInt(algo));
+                try writer.writeIntBig(u16, @enumToInt(algo));
             }
         }
     };
@@ -450,11 +450,11 @@ pub const extension = struct {
             };
         }
 
-        /// encode self to Buffer, buf_ptr must be a pointer to Buffer type
-        pub fn encode(self: *const Self, buf_ptr: anytype) BufferError!void {
+        /// encode self to writer
+        pub fn encode(self: *const Self, writer: anytype) BufferError!void {
             _ = self;
-            try buf_ptr.writer().writeIntBig(u8, @as(u8, @sizeOf(u16)));
-            try buf_ptr.writer().writeIntBig(u16, @as(u16, TLS13));
+            try writer.writeIntBig(u8, @as(u8, @sizeOf(u16)));
+            try writer.writeIntBig(u16, @as(u16, TLS13));
         }
     };
 
@@ -498,19 +498,19 @@ pub const extension = struct {
             return len;
         }
 
-        /// encode self to Buffer, buf_ptr must be a pointer to Buffer type
-        pub fn encode(self: *const Self, buf_ptr: anytype) BufferError!void {
+        /// encode self to writer
+        pub fn encode(self: *const Self, writer: anytype) BufferError!void {
             var length: usize = 0;
             for (self.shares.items) |*share| {
                 length += @sizeOf(u16) * 2;
                 length += share.key_exchange.items.len;
             }
-            try buf_ptr.writer().writeIntBig(u16, @intCast(u16, length));
+            try writer.writeIntBig(u16, @intCast(u16, length));
 
             for (self.shares.items) |*share| {
-                try buf_ptr.writer().writeIntBig(u16, @enumToInt(share.group));
-                try buf_ptr.writer().writeIntBig(u16, @intCast(u16, self.shares.items.len));
-                _ = try buf_ptr.writer().write(share.key_exchange.items);
+                try writer.writeIntBig(u16, @enumToInt(share.group));
+                try writer.writeIntBig(u16, @intCast(u16, self.shares.items.len));
+                _ = try writer.write(share.key_exchange.items);
             }
         }
     };
@@ -521,7 +521,7 @@ pub const extension = struct {
         // supported groups
         var sg = Extension{ .supported_groups = try SupportedGroups.init() };
         defer sg.deinit();
-        try sg.encode(&buf);
+        try sg.encode(buf.writer());
         try testing.expectFmt(
             "000A00040002001D",
             "{s}",
@@ -533,7 +533,7 @@ pub const extension = struct {
         buf.clear();
         var sa = Extension{ .signature_algorithms = try SignatureAlgorithms.init() };
         defer sa.deinit();
-        try sa.encode(&buf);
+        try sa.encode(buf.writer());
         try testing.expectFmt(
             "000D00080006040308040401",
             "{s}",
@@ -545,7 +545,7 @@ pub const extension = struct {
         buf.clear();
         var sv = Extension{ .supported_versions = SupportedVersions.init() };
         defer sv.deinit();
-        try sv.encode(&buf);
+        try sv.encode(buf.writer());
         try testing.expectFmt(
             "002B0003020304",
             "{s}",
@@ -557,7 +557,7 @@ pub const extension = struct {
         buf.clear();
         var ks = Extension{ .key_share = try KeyShare.init(testing.allocator) };
         defer ks.deinit();
-        try ks.encode(&buf);
+        try ks.encode(buf.writer());
         try testing.expectFmt(
             "003300020000",
             "{s}",
@@ -571,7 +571,7 @@ test "client hello" {
     var client_hello = try Handshake.initClient(testing.allocator);
     defer client_hello.deinit();
     var buf = Buffer(1024).init();
-    try client_hello.encode(&buf);
+    try client_hello.encode(buf.writer());
     const len = buf.unreadLength();
     const before_random = buf.getUnreadSlice()[0..6];
     const after_random = buf.getUnreadSlice()[6 + 32 .. len];
