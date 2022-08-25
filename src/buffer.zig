@@ -4,7 +4,8 @@ const mem = std.mem;
 const io = std.io;
 
 pub const BufferError = error{
-    NotEnoughRemainCapacity,
+    NotEnoughUnwrittenLength,
+    NotEnoughUnreadLength,
 };
 
 /// return struct that have internal u8 array, read_pos and write_pos.
@@ -47,7 +48,7 @@ pub fn Buffer(comptime capacity: comptime_int) type {
         pub fn write(self: *Self, input: []const u8) BufferError!usize {
             const unwritten = self.getUnwrittenSlice();
             if (input.len > unwritten.len)
-                return BufferError.NotEnoughRemainCapacity
+                return BufferError.NotEnoughUnwrittenLength
             else
                 mem.copy(u8, unwritten, input);
             self.write_pos += input.len;
