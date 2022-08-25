@@ -7,3 +7,9 @@ docgen_tmp/
 
 # python
 venv/
+
+# test client and server
+private.key
+server.csr
+server.crt
+log/
