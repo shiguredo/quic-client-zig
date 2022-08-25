@@ -1,0 +1,7 @@
+aioquic==0.9.20
+certifi==2022.6.15
+cffi==1.15.1
+cryptography==37.0.4
+pycparser==2.21
+pylsqpack==0.3.16
+pyOpenSSL==22.0.0
