@@ -39,10 +39,8 @@ pub const VariableLengthInt = struct {
 
     pub const Error = error{ VLIntLengthShort, VLIntInvalidLength, VLIntInvalidValue } || BufferError;
 
-    /// encode to Buffer
-    /// buf_ptr is pointer to Buffer
-    pub fn encode(self: *const Self, buf_ptr: anytype) Error!void {
-        if (buf_ptr.unwrittenLength() < self.len) return Error.NotEnoughUnwrittenLength;
+    /// encode to writer in Variable-length-integer format
+    pub fn encode(self: *const Self, writer: anytype) Error!void {
         if (self.value >= (@as(u64, 1) << @intCast(u6, self.len * 8 - 2)))
             return Error.VLIntLengthShort; // check for having enough length to express the value
 
@@ -66,18 +64,15 @@ pub const VariableLengthInt = struct {
 
         temp[0] |= len_bits_mask;
 
-        _ = try buf_ptr.writer().write(temp[0..self.len]);
+        _ = try writer.write(temp[0..self.len]);
 
         return;
     }
 
-    /// decode variable-length-interger-coded Buffer
-    /// buf_ptr is pointer to Buffer
-    pub fn decode(buf_ptr: anytype) Error!Self {
-        if (buf_ptr.unreadLength() == 0) return Error.NotEnoughUnreadLength;
-
+    /// decode variable-length-interger-coded array via reader
+    pub fn decode(reader: anytype) !Self {
         var temp = [_]u8{0} ** 8;
-        _ = try buf_ptr.reader().read(temp[0..1]);
+        temp[0] = try reader.readByte();
 
         const len_bits = temp[0] & 0xC0;
         const length: usize = switch (len_bits) {
@@ -88,10 +83,9 @@ pub const VariableLengthInt = struct {
             else => unreachable,
         };
 
-        if (buf_ptr.unreadLength() + 1 < length) return Error.NotEnoughUnreadLength;
-
         if (length > 1) {
-            _ = try buf_ptr.reader().read(temp[1..length]);
+            const count = try reader.read(temp[1..length]);
+            if (count + 1 < length) return Error.NotEnoughUnreadLength;
         }
 
         temp[0] &= 0x3F; // remove length field
@@ -134,7 +128,7 @@ pub const VariableLengthInt = struct {
 test "decode u8 array to variable length int" {
     var buf = Buffer(32).init();
     _ = try buf.writer().write(&[4]u8{ 0x81, 0x04, 0x48, 0xad });
-    const v_int1 = try VariableLengthInt.decode(&buf);
+    const v_int1 = try VariableLengthInt.decode(buf.reader());
     try testing.expectEqual(@as(usize, 4), v_int1.len);
     try testing.expectEqual(@as(u64, 0x010448ad), v_int1.value);
 }
@@ -142,7 +136,7 @@ test "decode u8 array to variable length int" {
 test "encode variable length int to u8 array" {
     const v_int = VariableLengthInt{ .value = 0x010448ad, .len = 4 };
     var buf = Buffer(32).init();
-    try v_int.encode(&buf);
+    try v_int.encode(buf.writer());
     try testing.expectEqual(@as(usize, 4), buf.unreadLength());
     try testing.expectEqualSlices(u8, &[_]u8{ 0x81, 0x04, 0x48, 0xad }, buf.getUnreadSlice());
 }
