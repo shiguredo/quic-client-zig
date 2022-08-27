@@ -47,6 +47,78 @@ pub const Provider = struct {
         q_crypto.hkdfExpandLabel(&self.client_hp, self.client_initial, "quic hp", "");
         q_crypto.hkdfExpandLabel(&self.server_hp, self.server_initial, "quic hp", "");
     }
+
+    test "setUpInitial" {
+        // test vectors from https://www.rfc-editor.org/rfc/rfc9001#name-sample-packet-protection
+        var tls_provider = Provider{};
+        tls_provider.setUpInitial(
+            &[_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 },
+        );
+
+        // initial secret
+        try testing.expectFmt(
+            "7db5df06e7a69e432496adedb0085192" ++ "3595221596ae2ae9fb8115c1e9ed0a44",
+            "{s}",
+            .{std.fmt.fmtSliceHexLower(&tls_provider.initial_secret)},
+        );
+
+        // client initial secret
+        try testing.expectFmt(
+            "c00cf151ca5be075ed0ebfb5c80323c4" ++ "2d6b7db67881289af4008f1f6c357aea",
+            "{s}",
+            .{std.fmt.fmtSliceHexLower(&tls_provider.client_initial)},
+        );
+
+        // client initial key
+        try testing.expectFmt(
+            "1f369613dd76d5467730efcbe3b1a22d",
+            "{s}",
+            .{std.fmt.fmtSliceHexLower(&tls_provider.client_initial_key)},
+        );
+
+        // client iv
+        try testing.expectFmt(
+            "fa044b2f42a3fd3b46fb255c",
+            "{s}",
+            .{std.fmt.fmtSliceHexLower(&tls_provider.client_iv)},
+        );
+
+        // client hp key
+        try testing.expectFmt(
+            "9f50449e04a0e810283a1e9933adedd2",
+            "{s}",
+            .{std.fmt.fmtSliceHexLower(&tls_provider.client_hp)},
+        );
+
+        // server initial secret
+        try testing.expectFmt(
+            "3c199828fd139efd216c155ad844cc81" ++ "fb82fa8d7446fa7d78be803acdda951b",
+            "{s}",
+            .{std.fmt.fmtSliceHexLower(&tls_provider.server_initial)},
+        );
+
+        // server key
+        try testing.expectFmt(
+            "cf3a5331653c364c88f0f379b6067e37",
+            "{s}",
+            .{std.fmt.fmtSliceHexLower(&tls_provider.server_initial_key)},
+        );
+
+        // server iv
+        try testing.expectFmt(
+            "0ac1493ca1905853b0bba03e",
+            "{s}",
+            .{std.fmt.fmtSliceHexLower(&tls_provider.server_iv)},
+        );
+
+        // server hp key
+        try testing.expectFmt(
+            "c206b8d9b9f0f37644430b490eeaa314",
+            "{s}",
+            .{std.fmt.fmtSliceHexLower(&tls_provider.server_hp)},
+        );
+
+    }
 };
 
 pub const TlsMessageType = enum {
@@ -595,4 +667,9 @@ test "client hello" {
     // zig fmt: on
 
     try testing.expectEqual(len, client_hello.getEncLen());
+}
+
+test "all namespace" {
+    _ = Provider;
+    _ = extension;
 }
