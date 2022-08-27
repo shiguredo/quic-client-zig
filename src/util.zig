@@ -82,6 +82,11 @@ pub const VariableLengthInt = struct {
         };
     }
 
+    pub fn fromInt(value: anytype) Error!Self {
+        const val_u64 = if (@TypeOf(value) == u64) value else @intCast(u64, value);
+        return fromU64(val_u64);
+    }
+
     pub fn fromU64(value: u64) Error!Self {
         const ONE_BIT_MAX = (1 << 6) - 1;
         const TWO_BITS_MAX = (1 << 14) - 1;
