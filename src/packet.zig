@@ -1,134 +1,155 @@
 const std = @import("std");
-const buffer = @import("./buffer.zig");
-const util = @import("./util.zig");
-
-const Buffer = buffer.Buffer;
-const BufferError = buffer.BufferError;
 const crypto = std.crypto;
-const ArrayList = std.ArrayList;
+const aes_gcm = crypto.aead.aes_gcm;
+const mem = std.mem;
 
-const Frame = @import("./frame.zig").Frame;
+const util = @import("util.zig");
+const frame = @import("frame.zig");
+const tls = @import("tls.zig");
+const q_crypto = @import("crypto.zig");
 
-const Header = struct {
-    const Self = @This();
-    const MAX_ID_LENGTH = 255;
+const VariableLengthInt = util.VariableLengthInt;
 
-    first_byte: u8,
+const HeaderForm = enum(u1) {
+    short = 0b0,
+    long = 0b1,
+};
 
-    packet_number_length: u16,
+const LongHeaderPacketTypes = enum(u2) {
+    initial = 0x00,
+    zero_rtt = 0x01,
+    handshake = 0x02,
+    retry = 0x03,
+};
+
+const MAX_CID_LENGTH = 255;
+const QUIC_VERSION_1 = 0x00000001;
+const MIN_UDP_PAYLOAD_LENGTH = 1200;
+
+const InitialPacket = struct {
+    reserved_bits: u2,
+    pn_length: u2,
+
     version: u32,
+    dst_cid: std.BoundedArray(u8, MAX_CID_LENGTH),
+    src_cid: std.BoundedArray(u8, MAX_CID_LENGTH),
+    token: std.ArrayList(u8),
+    packet_number: u32,
 
-    destination_connection_id_length: u8,
-    destination_connection_id: [MAX_ID_LENGTH]u8,
+    payload: std.ArrayList(frame.Frame),
 
-    source_connection_id_length: u8,
-    source_connection_id: [MAX_ID_LENGTH]u8,
-
-    token: ?ArrayList(u8),
-
-    packet_number: [4]u8,
-
-    const QUIC_VERSION_1: u32 = 0x00000001;
-
-    const HeaderForm = enum(u1) {
-        short = 0b0,
-        long = 0b1,
-    };
-
-    const LongHeaderPacketTypes = enum(u2) {
-        initial = 0x00,
-        zero_rtt = 0x01,
-        handshake = 0x02,
-        retry = 0x03,
-    };
-
-    const FIRST_BYTE_FIXED_BIT: comptime_int = 0b01000000;
-
-    pub fn initialPacketHeader(given_source_id: ?[]u8, given_destination_id: ?[]u8) Self {
-        const first_byte: u8 = 0x00;
-        first_byte |= @enumToInt(HeaderForm.long) << 7;
-        first_byte |= FIRST_BYTE_FIXED_BIT;
-        first_byte |= @enumToInt(LongHeaderPacketTypes.initial) << 4;
-
-        var source_id_length: u8 = undefined;
-        var source_id: [MAX_ID_LENGTH]u8 = undefined;
-        if (given_source_id) |s_id| { // if source connection id is given by server
-            source_id_length = @intCast(u8, s_id.len);
-            for (s_id) |value, index| {
-                source_id[index] = value;
-            }
-        } else { // if source connection id is not given
-            source_id_length = 8;
-            for (source_id[0..source_id_length]) |_, index| {
-                source_id[index] = crypto.random.int(u8);
-            }
-        }
-
-        var destination_id_length: u8 = undefined;
-        var destination_id: [MAX_ID_LENGTH]u8 = undefined;
-        if (given_destination_id) |d_id| { // if destination connection id is given by server
-            destination_id_length = @intCast(u8, d_id.len);
-            for (d_id) |value, index| {
-                destination_id[index] = value;
-            }
-        } else { // if source connection id is not given (first initial packet)
-            destination_id_length = 8;
-            for (destination_id[0..destination_id_length]) |_, index| {
-                destination_id[index] = crypto.random.int(u8);
-            }
-        }
-
-        // TODO: PacketNumber
-        // TODO: Token
-
-        return .{
-            .first_byte = first_byte,
-            .version = QUIC_VERSION_1,
-            .destination_connection_id_length = destination_id_length,
-            .destination_connection_id = destination_id,
-            .source_connection_id_length = source_id_length,
-            .source_connection_id = source_id,
-            .token = null,
-            .packet_number = 0,
-        };
-    }
-};
-
-const Packet = struct {
     const Self = @This();
 
-    header: Header,
-    frames: ArrayList(Frame),
+    pub fn encodeEncrypted(
+        self: *const Self,
+        writer: anytype,
+        allocator: mem.Allocator,
+        tls_provider: tls.Provider,
+    ) !void {
+        // make plain text payload array
+        // plain text is (packet number) + (frame payloads) + (padding)
+        var plain_text = std.ArrayList(u8).init(allocator);
+        defer plain_text.deinit();
 
-    pub fn encode(self: *Self, buf: *Buffer) !void {
-        var count: usize = 0;
-        var slice = try buf.getOffsetSlice(0);
-        const header = self.header;
-        const frames = self.frames;
+        for (self.payload.items) |*frame_item| {
+            frame_item.encode(plain_text.writer());
+        }
 
-        slice[count] = header.first_byte;
-        count += 1;
+        // create padding field
+        const len_without_length_field = blk: {
+            var temp: usize = 0;
+            temp += self.headerLengthWithoutLengthField();
+            temp += plain_text.items.len;
+            break :blk temp;
+        };
+        if (len_without_length_field + 2 < MIN_UDP_PAYLOAD_LENGTH) {
+            // if UDP payload less than 1200, add padding
+            // + 2 is the min length of "length" field
+            const padding_len = MIN_UDP_PAYLOAD_LENGTH - len_without_length_field;
+            const padding = frame.PaddingFrame.init(padding_len);
+            padding.encode(plain_text.writer());
+        }
 
-        const big_endian_version = util.getBigEndianInt(u32, header.version);
-        const version_byte_count = @sizeOf(u32);
-        @memcpy(@ptrCast([*]u8, big_endian_version), slice[count..(count + version_byte_count)], version_byte_count);
-        count += version_byte_count;
+        // create header
+        const token_length = try self.tokenLengthVli();
+        const length_field = plain_text.items.len + self.decodePnLength() + aes_gcm.Aes128Gcm.tag_length;
+        const rem_length = try VariableLengthInt.fromInt(length_field);
+        var pn_array = [_]u8{0} ** @sizeOf(u32);
+        mem.writeIntBig(u32, &pn_array, self.packet_number);
 
-        const destination_id_length = header.destination_connection_id_length;
-        slice[count] = destination_id_length;
-        count += 1;
-        @memcpy(slice[count..(count + @intCast(usize, destination_id_length))], header.destination_connection_id[0..destination_id_length], destination_id_length);
-        count += destination_id_length;
+        var header = std.ArrayList(u8).init(allocator);
+        var h_writer = header.writer();
+        try h_writer.writeIntBig(self.firstByte());
+        try h_writer.writeIntBig(u32, QUIC_VERSION_1);
+        try h_writer.writeIntBig(u8, @intCast(u8, self.dst_cid.len));
+        try h_writer.writeAll(self.dst_cid.constSlice());
+        try h_writer.writeIntBig(u8, @intCast(u8, self.src_cid.len));
+        try h_writer.writeAll(self.src_cid.constSlice());
+        try token_length.encode(h_writer);
+        try h_writer.writeAll(self.token.items);
+        try rem_length.encode(h_writer);
+        try h_writer.writeAll(pn_array[pn_array.len - self.decodePnLength() ..]);
 
-        const source_id_length = header.source_connection_id_length;
-        slice[count] = source_id_length;
-        count += 1;
-        @memcpy(slice[count..(count + @intCast(usize, source_id_length))], header.source_connection_id[0..source_id_length], source_id_length);
-        count += source_id_length;
+        // encrypt
+        const encrypted_bytes = try q_crypto.encryptInitialPacket(
+            aes_gcm.Aes128Gcm,
+            header.items,
+            plain_text.items,
+            tls_provider.client_initial_key,
+            tls_provider.client_iv,
+            tls_provider.client_hp,
+            allocator,
+        );
+        defer encrypted_bytes.deinit();
 
-        // TODO: switching by header type
-        // TODO: writing frames
+        // write to writer
+        try writer.writeAll(encrypted_bytes.items);
+        return;
+    }
+
+    /// get payload encoded length without padding field
+    pub fn payloadByteLength(self: *const Self) usize {
+        var len: usize = 0;
+        for (self.payload.items) |*frame_item| {
+            len += frame_item.getEncLen();
+        }
+        return len;
+    }
+
+    /// return first byte as u8
+    pub fn firstByte(self: *const Self) u8 {
+        var first_byte: u8 = 0;
+        first_byte |= @intCast(u8, HeaderForm.long) << 7;
+        first_byte |= 0b01000000;
+        first_byte |= @intCast(u8, LongHeaderPacketTypes.initial) << 4;
+        first_byte |= @intCast(u8, self.reserved_bits) << 2;
+        first_byte |= @intCast(u8, self.pn_length);
+        return first_byte;
+    }
+
+    /// decode packet number length to usize
+    pub fn decodePnLength(self: *const Self) usize {
+        return @intCast(usize, self.pn_length) + 1;
+    }
+
+    /// return token length in VariableLengthInt struct
+    pub fn tokenLengthVli(
+        self: *const Self,
+    ) VariableLengthInt.Error!VariableLengthInt {
+        return VariableLengthInt.fromInt(self.token.items.len);
+    }
+
+    /// return (header without "length" field length) + (not padded payload length)
+    pub fn headerLengthWithoutLengthField(self: *const Self) usize {
+        // zig fmt: off
+        const len_without_length_field: usize = 
+            ( 7    // first byte + version field + dcid len field + scid len field
+            + self.dst_cid.len
+            + self.src_cid.len
+            + self.tokenLengthVli().len
+            + self.token.len
+            + self.decodePnLength());
+        // zig fmt: on
+        return len_without_length_field;
     }
 };
-
-// TODO: test for packet
