@@ -1,10 +1,11 @@
 const std = @import("std");
-const ArrayList = std.ArrayList;
-
 const util = @import("util.zig");
+const tls = @import("tls.zig");
+
+const ArrayList = std.ArrayList;
 const VariableLengthInt = util.VariableLengthInt;
 
-const FrameType = enum {
+pub const FrameTypes = enum {
     padding,
     ack,
     crypto,
@@ -12,7 +13,7 @@ const FrameType = enum {
     handshake_done,
 };
 
-const Frame = union(FrameTypes) {
+pub const Frame = union(FrameTypes) {
     padding: PaddingFrame,
     ack: AckFrame,
     crypto: CryptoFrame,
@@ -20,11 +21,17 @@ const Frame = union(FrameTypes) {
     handshake_done: HandshakeDoneFrame,
 };
 
-const PaddingFrame = struct {
+pub const PaddingFrame = struct {
     length: usize,
+
+    const Self = @This();
+
+    pub fn encode(self: *const Self, writer: anytype) writer.Error!usize {
+        try writer.writeByteNTimes(0, self.length);
+    }
 };
 
-const AckFrame = struct {
+pub const AckFrame = struct {
     type_id: VariableLengthInt,
     largest_acknowledged: VariableLengthInt,
     ack_delay: VariableLengthInt,
@@ -43,20 +50,29 @@ const AckFrame = struct {
         ect1: VariableLengthInt,
         ecn_cn: VariableLengthInt,
     };
+
+    const Self = @This();
+
+    pub fn encode(self: *const Self, writer: anytype) !usize {
+        // TODO: implement
+        _ = self;
+        _ = writer;
+        return 0;
+    }
 };
 
-const CryptoFrame = struct {
+pub const CryptoFrame = struct {
     offset: VariableLengthInt,
     length: VariableLengthInt,
-    data: []u8,
+    data: tls.TlsMessage,
 };
 
-const StreamFrame = struct {
+pub const StreamFrame = struct {
     type_id: VariableLengthInt,
     stream_id: VariableLengthInt,
     offset: VariableLengthInt,
     length: VariableLengthInt,
-    data: []u8,
+    data: std.ArrayList(u8),
 };
 
-const HandshakeDoneFrame = struct {};
+pub const HandshakeDoneFrame = struct {};
