@@ -117,7 +117,6 @@ pub const Provider = struct {
             "{s}",
             .{std.fmt.fmtSliceHexLower(&tls_provider.server_hp)},
         );
-
     }
 };
 
@@ -207,6 +206,36 @@ pub const Handshake = union(HandshakeType) {
         }
 
         return;
+    }
+
+    test "client hello" {
+        var client_hello = try Handshake.initClient(testing.allocator);
+        defer client_hello.deinit();
+        var buf = Buffer(1024).init();
+        try client_hello.encode(buf.writer());
+        const len = buf.unreadLength();
+        const before_random = buf.getUnreadSlice()[0..6];
+        const after_random = buf.getUnreadSlice()[6 + 32 .. len];
+        try testing.expectEqual(@as(u8, 0x01), buf.getUnreadSlice()[0]); // handshake type "ClientHello"
+        try testing.expectEqual(len - 4, @intCast(usize, mem.readInt(u24, before_random[1..4], .Big))); // length field of handshake
+        try testing.expectEqual(@as(u16, 0x0303), mem.readInt(u16, before_random[4..6], .Big)); // legacy_version == 0x0303
+
+        // zig fmt: off
+        try testing.expectFmt(
+            "00" ++ // legacy_session_id
+            "00021301" ++ // cipher_suites
+            "0100" ++ // legacy_compression_id
+            "0021" ++ // extension field length
+            "000A00040002001D" ++ // supported_groups
+            "000D00080006040308040401" ++ // sigunature_algorithms
+            "002B0003020304" ++ // supported_versions
+            "003300020000", // key_share
+            "{s}",
+            .{std.fmt.fmtSliceHexUpper(after_random)},
+        );
+        // zig fmt: on
+
+        try testing.expectEqual(len, client_hello.getEncLen());
     }
 };
 
@@ -639,37 +668,8 @@ pub const extension = struct {
     }
 };
 
-test "client hello" {
-    var client_hello = try Handshake.initClient(testing.allocator);
-    defer client_hello.deinit();
-    var buf = Buffer(1024).init();
-    try client_hello.encode(buf.writer());
-    const len = buf.unreadLength();
-    const before_random = buf.getUnreadSlice()[0..6];
-    const after_random = buf.getUnreadSlice()[6 + 32 .. len];
-    try testing.expectEqual(@as(u8, 0x01), buf.getUnreadSlice()[0]); // handshake type "ClientHello"
-    try testing.expectEqual(len - 4, @intCast(usize, mem.readInt(u24, before_random[1..4], .Big))); // length field of handshake
-    try testing.expectEqual(@as(u16, 0x0303), mem.readInt(u16, before_random[4..6], .Big)); // legacy_version == 0x0303
-
-    // zig fmt: off
-    try testing.expectFmt(
-        "00" ++ // legacy_session_id
-        "00021301" ++ // cipher_suites
-        "0100" ++ // legacy_compression_id
-        "0021" ++ // extension field length
-        "000A00040002001D" ++ // supported_groups
-        "000D00080006040308040401" ++ // sigunature_algorithms
-        "002B0003020304" ++ // supported_versions
-        "003300020000", // key_share
-        "{s}",
-        .{std.fmt.fmtSliceHexUpper(after_random)},
-    );
-    // zig fmt: on
-
-    try testing.expectEqual(len, client_hello.getEncLen());
-}
-
 test "all namespace" {
     _ = Provider;
+    _ = Handshake;
     _ = extension;
 }
