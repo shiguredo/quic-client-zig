@@ -25,7 +25,7 @@ pub fn udpConnectToAddress(address: net.Address) !Datagram {
 
 // when you run this test, you have to run `test/udp_server.py`
 test "udp send and recieve" {
-    const address = std.net.Address.initIp4(.{127, 0, 0, 1}, 4000);
+    const address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 4000);
     var conn = try udpConnectToAddress(address);
     defer conn.close();
     _ = try conn.write("send test");
