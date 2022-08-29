@@ -220,10 +220,40 @@ pub const Handshake = union(HandshakeType) {
     }
 
     test "client hello" {
-        var client_hello = try Handshake.initClient(testing.allocator);
-        defer client_hello.deinit();
+        var client_hello = try ClientHello.init(testing.allocator);
+        try client_hello.appendCipher([_]u8{ 0x13, 0x01 }); // TLS_AES_128_GCM_SHA256
+        var extensions = [_]extension.Extension{
+            supported_groups: {
+                var sg = extension.SupportedGroups.init();
+                try sg.append(.x25519);
+                break :supported_groups extension.Extension{ .supported_groups = sg };
+            },
+            signature_algorithms: {
+                var sa = extension.SignatureAlgorithms.init();
+                try sa.appendSlice(&[_]extension.SignatureScheme{
+                    .ecdsa_secp256r1_sha256,
+                    .rsa_pss_rsae_sha256,
+                    .rsa_pksc1_sha256,
+                });
+                break :signature_algorithms extension.Extension{ .signature_algorithms = sa };
+            },
+            supported_versions: {
+                var sv = extension.SupportedVersions.init();
+                try sv.append(extension.SupportedVersions.TLS13);
+                break :supported_versions extension.Extension{ .supported_versions = sv };
+            },
+            key_share: {
+                var ks = extension.KeyShare.init(testing.allocator);
+                break :key_share extension.Extension{ .key_share = ks };
+            },
+        };
+        try client_hello.appendExtensionSlice(&extensions);
+
+        var client_hello_hs = Handshake{ .client_hello = client_hello };
+        defer client_hello_hs.deinit();
+
         var buf = Buffer(1024).init();
-        try client_hello.encode(buf.writer());
+        try client_hello_hs.encode(buf.writer());
         const len = buf.unreadLength();
         const before_random = buf.getUnreadSlice()[0..6];
         const after_random = buf.getUnreadSlice()[6 + 32 .. len];
@@ -246,7 +276,7 @@ pub const Handshake = union(HandshakeType) {
         );
         // zig fmt: on
 
-        try testing.expectEqual(len, client_hello.getEncLen());
+        try testing.expectEqual(len, client_hello_hs.getEncLen());
     }
 };
 
@@ -277,17 +307,7 @@ pub const ClientHello = struct {
         };
 
         crypto.random.bytes(&instance.random_bytes); // assign random bytes
-        try instance.cipher_suites.appendSlice(&[_][2]u8{.{ 0x13, 0x01 }}); // supports TLS_AES_128_GCM_SHA256
         try instance.legacy_compression_methods.appendSlice(&[_]u8{0}); // value for "null"
-
-        const extensions = [_]extension.Extension{
-            .{ .supported_groups = try extension.SupportedGroups.init() },
-            .{ .signature_algorithms = try extension.SignatureAlgorithms.init() },
-            .{ .supported_versions = extension.SupportedVersions.init() },
-            .{ .key_share = try extension.KeyShare.init(allocator) },
-        };
-
-        try instance.extensions.appendSlice(&extensions);
 
         return instance;
     }
@@ -297,6 +317,21 @@ pub const ClientHello = struct {
             ext.deinit();
         }
         self.extensions.deinit();
+    }
+
+    pub fn appendCipher(self: *Self, cipher_suite: [2]u8) error{Overflow}!void {
+        try self.cipher_suites.append(cipher_suite);
+    }
+
+    pub fn appendExtension(self: *Self, ext: extension.Extension) mem.Allocator.Error!void {
+        try self.extensions.append(ext);
+    }
+
+    pub fn appendExtensionSlice(
+        self: *Self,
+        exts: []const extension.Extension,
+    ) mem.Allocator.Error!void {
+        try self.extensions.appendSlice(exts);
     }
 
     /// get encoded bytes size
@@ -480,12 +515,19 @@ pub const extension = struct {
 
         const Self = @This();
 
-        pub fn init() !Self {
-            var list = try NamedGroupList.init(0);
-            try list.append(.x25519);
+        pub fn init() Self {
+            var list = NamedGroupList.init(0) catch unreachable;
             return Self{
                 .named_group_list = list,
             };
+        }
+
+        pub fn append(self: *Self, group: NamedGroup) error{Overflow}!void {
+            try self.named_group_list.append(group);
+        }
+
+        pub fn appendSlice(self: *Self, groups: []const NamedGroup) error{Overflow}!void {
+            try self.named_group_list.appendSlice(groups);
         }
 
         /// get encoded bytes size
@@ -513,14 +555,19 @@ pub const extension = struct {
 
         const Self = @This();
 
-        pub fn init() !Self {
-            var supports = try Algorithms.init(0);
-            try supports.append(.ecdsa_secp256r1_sha256);
-            try supports.append(.rsa_pss_rsae_sha256);
-            try supports.append(.rsa_pksc1_sha256);
+        pub fn init() Self {
+            var supports = Algorithms.init(0) catch unreachable;
             return Self{
                 .supported_algorithms = supports,
             };
+        }
+
+        pub fn append(self: *Self, scheme: SignatureScheme) error{Overflow}!void {
+            try self.supported_algorithms.append(scheme);
+        }
+
+        pub fn appendSlice(self: *Self, schemes: []const SignatureScheme) error{Overflow}!void {
+            try self.supported_algorithms.appendSlice(schemes);
         }
 
         /// get encoded bytes size
@@ -544,29 +591,37 @@ pub const extension = struct {
 
     /// only tls 1.3 is supported
     pub const SupportedVersions = struct {
+        const Versions = std.BoundedArray(u16, 128);
+
+        versions: Versions,
+
         pub const TLS13 = 0x0304;
         const Self = @This();
 
         pub fn init() Self {
-            return .{};
+            return .{ .versions = Versions.init(0) catch unreachable };
+        }
+
+        pub fn append(self: *Self, version: u16) error{Overflow}!void {
+            try self.versions.append(version);
         }
 
         /// get encoded bytes size
         pub fn getEncLen(self: *const Self) usize {
-            _ = self;
             return blk: {
-                comptime var temp = 0;
+                var temp: usize = 0;
                 temp += @sizeOf(u8);
-                temp += @sizeOf(u16) * 1;
+                temp += @sizeOf(u16) * self.versions.len;
                 break :blk temp;
             };
         }
 
         /// encode self to writer
         pub fn encode(self: *const Self, writer: anytype) BufferError!void {
-            _ = self;
             try writer.writeIntBig(u8, @as(u8, @sizeOf(u16)));
-            try writer.writeIntBig(u16, @as(u16, TLS13));
+            for (self.versions.constSlice()) |version| {
+                try writer.writeIntBig(u16, @as(u16, version));
+            }
         }
     };
 
@@ -583,7 +638,7 @@ pub const extension = struct {
             key_exchange: std.ArrayList(u8),
         };
 
-        pub fn init(allocator: mem.Allocator) !Self {
+        pub fn init(allocator: mem.Allocator) Self {
             var shares = Shares.init(allocator);
 
             return Self{
@@ -596,6 +651,14 @@ pub const extension = struct {
                 entry.key_exchange.deinit();
             }
             self.shares.deinit();
+        }
+
+        pub fn append(self: *Self, entry: KeyShareEntry) mem.Allocator.Error!void {
+            try self.shares.append(entry);
+        }
+
+        pub fn appendSlice(self: *Self, entries: []const KeyShareEntry) mem.Allocator.Error!void {
+            try self.shares.appendSlice(entries);
         }
 
         /// get encoded bytes size
@@ -631,51 +694,70 @@ pub const extension = struct {
         var buf = Buffer(1024).init();
 
         // supported groups
-        var sg = Extension{ .supported_groups = try SupportedGroups.init() };
-        defer sg.deinit();
-        try sg.encode(buf.writer());
+        var sg_ext = sg_ext: {
+            var sg = SupportedGroups.init();
+            try sg.append(.x25519);
+            break :sg_ext Extension{ .supported_groups = sg };
+        };
+        defer sg_ext.deinit();
+        try sg_ext.encode(buf.writer());
         try testing.expectFmt(
             "000A00040002001D",
             "{s}",
             .{std.fmt.fmtSliceHexUpper(buf.getUnreadSlice())},
         );
-        try testing.expectEqual(buf.unreadLength(), sg.getEncLen());
+        try testing.expectEqual(buf.unreadLength(), sg_ext.getEncLen());
 
         // signature algorithms
         buf.clear();
-        var sa = Extension{ .signature_algorithms = try SignatureAlgorithms.init() };
-        defer sa.deinit();
-        try sa.encode(buf.writer());
+        var sa_ext = sa_ext: {
+            var sa = SignatureAlgorithms.init();
+            try sa.appendSlice(&[_]SignatureScheme{
+                .ecdsa_secp256r1_sha256,
+                .rsa_pss_rsae_sha256,
+                .rsa_pksc1_sha256,
+            });
+            break :sa_ext Extension{ .signature_algorithms = sa };
+        };
+        defer sa_ext.deinit();
+        try sa_ext.encode(buf.writer());
         try testing.expectFmt(
             "000D00080006040308040401",
             "{s}",
             .{std.fmt.fmtSliceHexUpper(buf.getUnreadSlice())},
         );
-        try testing.expectEqual(buf.unreadLength(), sa.getEncLen());
+        try testing.expectEqual(buf.unreadLength(), sa_ext.getEncLen());
 
         // supported versions
         buf.clear();
-        var sv = Extension{ .supported_versions = SupportedVersions.init() };
-        defer sv.deinit();
-        try sv.encode(buf.writer());
+        var sv_ext = sv_ext: {
+            var sv = SupportedVersions.init();
+            try sv.append(SupportedVersions.TLS13);
+            break :sv_ext Extension{ .supported_versions = sv };
+        };
+        defer sv_ext.deinit();
+        try sv_ext.encode(buf.writer());
         try testing.expectFmt(
             "002B0003020304",
             "{s}",
             .{std.fmt.fmtSliceHexUpper(buf.getUnreadSlice())},
         );
-        try testing.expectEqual(buf.unreadLength(), sv.getEncLen());
+        try testing.expectEqual(buf.unreadLength(), sv_ext.getEncLen());
 
         // key share
         buf.clear();
-        var ks = Extension{ .key_share = try KeyShare.init(testing.allocator) };
-        defer ks.deinit();
-        try ks.encode(buf.writer());
+        var ks_ext = ks_ext: {
+            var ks = KeyShare.init(testing.allocator);
+            break :ks_ext Extension{ .key_share = ks };
+        };
+        defer ks_ext.deinit();
+        try ks_ext.encode(buf.writer());
         try testing.expectFmt(
             "003300020000",
             "{s}",
             .{std.fmt.fmtSliceHexUpper(buf.getUnreadSlice())},
         );
-        try testing.expectEqual(buf.unreadLength(), ks.getEncLen());
+        try testing.expectEqual(buf.unreadLength(), ks_ext.getEncLen());
     }
 };
 
