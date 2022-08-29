@@ -100,6 +100,7 @@ test "HKDF-Expand-Label" {
     try testing.expectEqual(expected, client_key);
 }
 
+
 pub const HP_KEY_LENGTH = 16;
 
 /// given header and payload, return encrypted packet array list
@@ -187,13 +188,15 @@ test "encryptInitialPacket" {
         &[_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 },
     );
 
+    const client_initial = tls_provider.client_initial.?;
+
     const encrypted = try encryptInitialPacket(
         Aes128Gcm,
         header,
         payload,
-        tls_provider.client_initial_key,
-        tls_provider.client_iv,
-        tls_provider.client_hp,
+        client_initial.key,
+        client_initial.iv,
+        client_initial.hp,
         testing.allocator,
     );
     defer encrypted.deinit();
