@@ -4,9 +4,9 @@ const os = std.os;
 const testing = std.testing;
 const builtin = @import("builtin");
 
-const Datagram = net.Stream;
+pub const DatagramSocket = net.Stream;
 
-pub fn udpConnectToAddress(address: net.Address) !Datagram {
+pub fn udpConnectToAddress(address: net.Address) !DatagramSocket {
     const nonblock = if (std.io.is_async) os.SOCK.NONBLOCK else 0;
     const sock_flags = os.SOCK.DGRAM | nonblock |
         (if (builtin.target.os.tag == .windows) 0 else os.SOCK.CLOEXEC);
@@ -20,7 +20,7 @@ pub fn udpConnectToAddress(address: net.Address) !Datagram {
         try os.connect(sockfd, &address.any, address.getOsSockLen());
     }
 
-    return Datagram{ .handle = sockfd };
+    return DatagramSocket{ .handle = sockfd };
 }
 
 // when you run this test, you have to run `test/udp_server.py`
