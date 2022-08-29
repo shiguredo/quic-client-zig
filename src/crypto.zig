@@ -100,7 +100,6 @@ test "HKDF-Expand-Label" {
     try testing.expectEqual(expected, client_key);
 }
 
-
 pub const HP_KEY_LENGTH = 16;
 
 /// given header and payload, return encrypted packet array list
