@@ -19,6 +19,16 @@ pub const Frame = union(FrameTypes) {
     crypto: CryptoFrame,
     stream: StreamFrame,
     handshake_done: HandshakeDoneFrame,
+
+    const Self = @This();
+
+    pub fn encode(self: *const Self, writer: anytype) @TypeOf(writer).Error!void {
+        return switch (self.*) {
+            .padding => |f| f.encode(writer),
+            .crypto => |f| f.encode(writer),
+            else => unreachable, // TODO: implement
+        };
+    }
 };
 
 pub const PaddingFrame = struct {
@@ -26,7 +36,7 @@ pub const PaddingFrame = struct {
 
     const Self = @This();
 
-    pub fn encode(self: *const Self, writer: anytype) writer.Error!usize {
+    pub fn encode(self: Self, writer: anytype) @TypeOf(writer).Error!void {
         try writer.writeByteNTimes(0, self.length);
     }
 };
@@ -63,8 +73,18 @@ pub const AckFrame = struct {
 
 pub const CryptoFrame = struct {
     offset: VariableLengthInt,
-    length: VariableLengthInt,
-    data: tls.TlsMessage,
+    data: std.ArrayList(u8),
+
+    const Self = @This();
+
+    pub fn encode(self: Self, writer: anytype) (@TypeOf(writer).Error || VariableLengthInt.Error)!void {
+        const frame_type = try VariableLengthInt.fromInt(0x06);
+        try frame_type.encode(writer);
+        try self.offset.encode(writer);
+        const length = try VariableLengthInt.fromInt(self.data.items.len);
+        try length.encode(writer);
+        try writer.writeAll(self.data.items);
+    }
 };
 
 pub const StreamFrame = struct {
