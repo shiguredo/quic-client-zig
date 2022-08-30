@@ -17,6 +17,7 @@ if __name__ == '__main__':
     parser.add_argument('certificate', type=str)
     parser.add_argument('private', type=str)
     parser.add_argument('log_file', type=str)
+    parser.add_argument('ssl_keylog', type=str)
 
     args = parser.parse_args()
 
@@ -27,18 +28,20 @@ if __name__ == '__main__':
 
     logger = QuicFileLogger(args.log_file)
 
-    config = QuicConfiguration(
-        is_client=False,
-        max_datagram_frame_size=2**16,
-        quic_logger=logger,
-    )
-    config.load_cert_chain(args.certificate, args.private)
+    with open(args.ssl_keylog, 'w') as ssl_log:
+        config = QuicConfiguration(
+            is_client=False,
+            max_datagram_frame_size=2**16,
+            quic_logger=logger,
+            secrets_log_file=ssl_log,
+        )
+        config.load_cert_chain(args.certificate, args.private)
 
-    try:
-        asyncio.run(main(
-            host=args.host,
-            port=args.port,
-            config=config,
-        ))
-    except KeyboardInterrupt:
-        pass
+        try:
+            asyncio.run(main(
+                host=args.host,
+                port=args.port,
+                config=config,
+            ))
+        except KeyboardInterrupt:
+            pass
