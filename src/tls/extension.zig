@@ -7,6 +7,7 @@ pub const ExtensionType = enum(u16) {
     signature_algorithms = 13,
     supported_versions = 43,
     key_share = 51,
+    quic_transport_parameters = 0x39,
 };
 
 /// TLS message extensions.
@@ -16,12 +17,14 @@ pub const Extension = union(ExtensionType) {
     signature_algorithms: SignatureAlgorithms,
     supported_versions: SupportedVersions,
     key_share: KeyShare,
+    quic_transport_parameters: QuicTransportParameters,
 
     const Self = @This();
 
     pub fn deinit(self: *Self) void {
         switch (self.*) {
-            .key_share => |*e| e.deinit(),
+            .key_share => |e| e.deinit(),
+            .quic_transport_parameters => |e| e.deinit(),
             else => {},
         }
     }
@@ -36,6 +39,7 @@ pub const Extension = union(ExtensionType) {
             .signature_algorithms => |e| e.getEncLen(),
             .supported_versions => |e| e.getEncLen(),
             .key_share => |e| e.getEncLen(),
+            .quic_transport_parameters => |e| e.getEncLen(),
         };
         return len;
     }
@@ -50,6 +54,7 @@ pub const Extension = union(ExtensionType) {
             .signature_algorithms => |e| e.getEncLen(),
             .supported_versions => |e| e.getEncLen(),
             .key_share => |e| e.getEncLen(),
+            .quic_transport_parameters => |e| e.getEncLen(),
         };
         try writer.writeIntBig(u16, @intCast(u16, data_len));
 
@@ -58,6 +63,7 @@ pub const Extension = union(ExtensionType) {
             .signature_algorithms => |e| e.encode(writer),
             .supported_versions => |e| e.encode(writer),
             .key_share => |e| e.encode(writer),
+            .quic_transport_parameters => |e| e.encode(writer),
         };
     }
 };
@@ -66,6 +72,7 @@ pub const SupportedGroups = @import("extension/supported_groups.zig").SupportedG
 pub const SignatureAlgorithms = @import("extension/signature_algorithms.zig").SignatureAlgorithms;
 pub const SupportedVersions = @import("extension/supported_versions.zig").SupportedVersions;
 pub const KeyShare = @import("extension/key_share.zig").KeyShare;
+pub const QuicTransportParameters = @import("extension/quic_transport_parameters.zig").QuicTransportParameters;
 
 pub const NamedGroup = enum(u16) {
     // Elliptic Curve Groups (ECDHE)

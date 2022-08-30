@@ -22,7 +22,7 @@ pub const KeyShare = struct {
         };
     }
 
-    pub fn deinit(self: *Self) void {
+    pub fn deinit(self: Self) void {
         for (self.shares.items) |entry| {
             entry.key_exchange.deinit();
         }
@@ -60,7 +60,7 @@ pub const KeyShare = struct {
 
         for (self.shares.items) |*share| {
             try writer.writeIntBig(u16, @enumToInt(share.group));
-            try writer.writeIntBig(u16, @intCast(u16, self.shares.items.len));
+            try writer.writeIntBig(u16, @intCast(u16, share.key_exchange.items.len));
             _ = try writer.write(share.key_exchange.items);
         }
     }
