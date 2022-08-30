@@ -1,7 +1,12 @@
 const std = @import("std");
+const mem = std.mem;
+const crypto = std.crypto;
 const testing = std.testing;
 
 const q_crypto = @import("../crypto.zig");
+const tls = @import("../tls.zig");
+const extension = tls.extension;
+const packet = @import("../packet.zig");
 
 const Hmac = q_crypto.Hmac;
 const Hkdf = q_crypto.Hkdf;
@@ -10,6 +15,8 @@ pub const Provider = struct {
     initial_secret: [Hmac.key_length]u8 = undefined,
     client_initial: ?QuicKeys = null,
     server_initial: ?QuicKeys = null,
+
+    x25519_keypair: ?crypto.dh.X25519.KeyPair = null,
 
     const Self = @This();
 
@@ -48,6 +55,55 @@ pub const Provider = struct {
 
         self.client_initial = client_initial;
         self.server_initial = server_initial;
+    }
+
+    pub fn createClientHello(
+        self: Self,
+        allocator: mem.Allocator,
+        quic_scid: packet.ConnectionId,
+    ) !tls.Handshake {
+        var c_hello = try tls.ClientHello.init(allocator);
+        try c_hello.appendCipher(.{ 0x13, 0x01 }); // TLS_AES_128_GCM_SHA256
+
+        const my_kp = self.x25519_keypair orelse return Error.KeyNotInstalled;
+
+        var extensions = [_]extension.Extension{
+            supported_groups: {
+                var sg = extension.SupportedGroups.init();
+                try sg.append(.x25519);
+                break :supported_groups extension.Extension{ .supported_groups = sg };
+            },
+            signature_algorithms: {
+                var sa = extension.SignatureAlgorithms.init();
+                try sa.appendSlice(&[_]extension.SignatureScheme{
+                    .ecdsa_secp256r1_sha256,
+                    .rsa_pss_rsae_sha256,
+                    .rsa_pksc1_sha256,
+                });
+                break :signature_algorithms extension.Extension{ .signature_algorithms = sa };
+            },
+            supported_versions: {
+                var sv = extension.SupportedVersions.init();
+                try sv.append(extension.SupportedVersions.TLS13);
+                break :supported_versions extension.Extension{ .supported_versions = sv };
+            },
+            key_share: {
+                var ks = extension.KeyShare.init(allocator);
+                var x25519_pub = std.ArrayList(u8).init(allocator);
+                try x25519_pub.appendSlice(&my_kp.public_key);
+                try ks.append(.{ .group = .x25519, .key_exchange = x25519_pub });
+                break :key_share extension.Extension{ .key_share = ks };
+            },
+            transport_param: {
+                var params = extension.QuicTransportParameters.init(allocator);
+                try params.appendParam(.initial_scid, quic_scid.constSlice());
+                break :transport_param extension.Extension{ .quic_transport_parameters = params };
+            },
+        };
+
+        try c_hello.appendExtensionSlice(&extensions);
+
+        return tls.Handshake{ .client_hello = c_hello };
     }
 };
 

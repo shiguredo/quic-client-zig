@@ -15,10 +15,10 @@ pub const VariableLengthInt = struct {
 
     const Self = @This();
 
-    pub const Error = error{ VLIntLengthShort, VLIntInvalidLength, VLIntInvalidValue } || BufferError;
+    pub const Error = error{ VLIntLengthShort, VLIntInvalidLength, VLIntInvalidValue };
 
     /// encode to writer in Variable-length-integer format
-    pub fn encode(self: *const Self, writer: anytype) Error!void {
+    pub fn encode(self: *const Self, writer: anytype) (Error || @TypeOf(writer).Error)!void {
         if (self.value >= (@as(u64, 1) << @intCast(u6, self.len * 8 - 2)))
             return Error.VLIntLengthShort; // check for having enough length to express the value
 
@@ -62,8 +62,7 @@ pub const VariableLengthInt = struct {
         };
 
         if (length > 1) {
-            const count = try reader.read(temp[1..length]);
-            if (count + 1 < length) return Error.NotEnoughUnreadLength;
+            _ = try reader.readAll(temp[1..length]);
         }
 
         temp[0] &= 0x3F; // remove length field

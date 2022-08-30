@@ -22,7 +22,7 @@ pub const Frame = union(FrameTypes) {
 
     const Self = @This();
 
-    pub fn encode(self: *const Self, writer: anytype) @TypeOf(writer).Error!void {
+    pub fn encode(self: *const Self, writer: anytype) !void {
         return switch (self.*) {
             .padding => |f| f.encode(writer),
             .crypto => |f| f.encode(writer),
@@ -35,6 +35,10 @@ pub const PaddingFrame = struct {
     length: usize,
 
     const Self = @This();
+
+    pub fn init(length: usize) Self {
+        return .{.length = length};
+    }
 
     pub fn encode(self: Self, writer: anytype) @TypeOf(writer).Error!void {
         try writer.writeByteNTimes(0, self.length);
@@ -76,6 +80,10 @@ pub const CryptoFrame = struct {
     data: std.ArrayList(u8),
 
     const Self = @This();
+
+    pub fn deinit(self: Self) void {
+        self.data.deinit();
+    }
 
     pub fn encode(self: Self, writer: anytype) (@TypeOf(writer).Error || VariableLengthInt.Error)!void {
         const frame_type = try VariableLengthInt.fromInt(0x06);

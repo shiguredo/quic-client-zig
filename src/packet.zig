@@ -23,22 +23,30 @@ const LongHeaderPacketTypes = enum(u2) {
 };
 
 const MAX_CID_LENGTH = 255;
-const QUIC_VERSION_1 = 0x00000001;
 const MIN_UDP_PAYLOAD_LENGTH = 1200;
 
-const InitialPacket = struct {
-    reserved_bits: u2,
+pub const QUIC_VERSION_1 = 0x00000001;
+pub const ConnectionId = std.BoundedArray(u8, MAX_CID_LENGTH);
+
+
+pub const InitialPacket = struct {
+    reserved_bits: u2 = 0x0,
     pn_length: u2,
 
-    version: u32,
-    dst_cid: std.BoundedArray(u8, MAX_CID_LENGTH),
-    src_cid: std.BoundedArray(u8, MAX_CID_LENGTH),
+    version: u32 = QUIC_VERSION_1,
+    dst_cid: ConnectionId,
+    src_cid: ConnectionId,
     token: std.ArrayList(u8),
     packet_number: u32,
 
     payload: std.ArrayList(frame.Frame),
 
     const Self = @This();
+
+    pub fn deinit(self: Self) void {
+        self.token.deinit();
+        self.payload.deinit();
+    }
 
     pub fn encodeEncrypted(
         self: *const Self,
@@ -52,13 +60,13 @@ const InitialPacket = struct {
         defer plain_text.deinit();
 
         for (self.payload.items) |*frame_item| {
-            frame_item.encode(plain_text.writer());
+            try frame_item.encode(plain_text.writer());
         }
 
         // create padding field
         const len_without_length_field = blk: {
             var temp: usize = 0;
-            temp += self.headerLengthWithoutLengthField();
+            temp += try self.headerLengthWithoutLengthField();
             temp += plain_text.items.len;
             break :blk temp;
         };
@@ -67,7 +75,7 @@ const InitialPacket = struct {
             // + 2 is the min length of "length" field
             const padding_len = MIN_UDP_PAYLOAD_LENGTH - len_without_length_field;
             const padding = frame.PaddingFrame.init(padding_len);
-            padding.encode(plain_text.writer());
+            try padding.encode(plain_text.writer());
         }
 
         // create header
@@ -78,8 +86,9 @@ const InitialPacket = struct {
         mem.writeIntBig(u32, &pn_array, self.packet_number);
 
         var header = std.ArrayList(u8).init(allocator);
+        defer header.deinit();
         var h_writer = header.writer();
-        try h_writer.writeIntBig(self.firstByte());
+        try h_writer.writeIntBig(u8, self.firstByte());
         try h_writer.writeIntBig(u32, QUIC_VERSION_1);
         try h_writer.writeIntBig(u8, @intCast(u8, self.dst_cid.len));
         try h_writer.writeAll(self.dst_cid.constSlice());
@@ -90,14 +99,16 @@ const InitialPacket = struct {
         try rem_length.encode(h_writer);
         try h_writer.writeAll(pn_array[pn_array.len - self.decodePnLength() ..]);
 
+        const client_initial = tls_provider.client_initial.?;
+
         // encrypt
         const encrypted_bytes = try q_crypto.encryptInitialPacket(
             aes_gcm.Aes128Gcm,
             header.items,
             plain_text.items,
-            tls_provider.client_initial_key,
-            tls_provider.client_iv,
-            tls_provider.client_hp,
+            client_initial.key,
+            client_initial.iv,
+            client_initial.hp,
             allocator,
         );
         defer encrypted_bytes.deinit();
@@ -119,9 +130,9 @@ const InitialPacket = struct {
     /// return first byte as u8
     pub fn firstByte(self: *const Self) u8 {
         var first_byte: u8 = 0;
-        first_byte |= @intCast(u8, HeaderForm.long) << 7;
+        first_byte |= @intCast(u8, @enumToInt(HeaderForm.long)) << 7;
         first_byte |= 0b01000000;
-        first_byte |= @intCast(u8, LongHeaderPacketTypes.initial) << 4;
+        first_byte |= @intCast(u8, @enumToInt(LongHeaderPacketTypes.initial),) << 4;
         first_byte |= @intCast(u8, self.reserved_bits) << 2;
         first_byte |= @intCast(u8, self.pn_length);
         return first_byte;
@@ -140,14 +151,17 @@ const InitialPacket = struct {
     }
 
     /// return (header without "length" field length) + (not padded payload length)
-    pub fn headerLengthWithoutLengthField(self: *const Self) usize {
+    pub fn headerLengthWithoutLengthField(self: *const Self) !usize {
         // zig fmt: off
         const len_without_length_field: usize = 
             ( 7    // first byte + version field + dcid len field + scid len field
             + self.dst_cid.len
             + self.src_cid.len
-            + self.tokenLengthVli().len
-            + self.token.len
+            + token_len: {
+                const token_length = try self.tokenLengthVli();
+                break :token_len token_length.len;
+            }
+            + self.token.items.len
             + self.decodePnLength());
         // zig fmt: on
         return len_without_length_field;
