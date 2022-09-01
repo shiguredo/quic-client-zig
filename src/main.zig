@@ -10,6 +10,5 @@ test "all" {
     _ = @import("frame.zig");
     _ = @import("tls.zig");
     _ = @import("util.zig");
-
-    std.testing.refAllDecls(@This());
+    _ = @import("connection.zig");
 }
