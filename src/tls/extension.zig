@@ -2,6 +2,8 @@ const std = @import("std");
 const mem = std.mem;
 const testing = std.testing;
 
+const HandshakeType = @import("handshake.zig").HandshakeType;
+
 pub const ExtensionType = enum(u16) {
     supported_groups = 10,
     signature_algorithms = 13,
@@ -21,8 +23,12 @@ pub const Extension = union(ExtensionType) {
 
     const Self = @This();
 
-    pub fn deinit(self: *Self) void {
-        switch (self.*) {
+    const Error = error{
+        InvalidExtensionFormat,
+    };
+
+    pub fn deinit(self: Self) void {
+        switch (self) {
             .key_share => |e| e.deinit(),
             .quic_transport_parameters => |e| e.deinit(),
             else => {},
@@ -45,7 +51,7 @@ pub const Extension = union(ExtensionType) {
     }
 
     /// encode self to writer
-    pub fn encode(self: *const Self, writer: anytype) @TypeOf(writer).Error!void {
+    pub fn encode(self: *const Self, writer: anytype) !void {
         const ext_type = @as(ExtensionType, self.*);
         try writer.writeIntBig(u16, @enumToInt(ext_type));
 
@@ -58,12 +64,34 @@ pub const Extension = union(ExtensionType) {
         };
         try writer.writeIntBig(u16, @intCast(u16, data_len));
 
-        try switch (self.*) {
-            .supported_groups => |e| e.encode(writer),
-            .signature_algorithms => |e| e.encode(writer),
-            .supported_versions => |e| e.encode(writer),
-            .key_share => |e| e.encode(writer),
-            .quic_transport_parameters => |e| e.encode(writer),
+        switch (self.*) {
+            .supported_groups => |e| try e.encode(writer),
+            .signature_algorithms => |e| try e.encode(writer),
+            .supported_versions => |e| try e.encode(writer),
+            .key_share => |e| try e.encode(writer),
+            .quic_transport_parameters => |e| try e.encode(writer),
+        }
+    }
+
+    pub fn decode(msg_type: HandshakeType, reader: anytype, allocator: mem.Allocator) !Self {
+        const type_value = try reader.readIntBig(u16);
+        const type_enum = switch (type_value) {
+            10, 13, 43, 51, 0x39 => @intToEnum(ExtensionType, type_value),
+            else => return Error.InvalidExtensionFormat,
+        };
+
+        const ext_data_len = try reader.readIntBig(u16);
+        var ext_stream = std.io.limitedReader(reader, @intCast(u64, ext_data_len));
+        var ext_reader = ext_stream.reader();
+
+        return switch (type_enum) {
+            .supported_versions => Self{
+                .supported_versions = try SupportedVersions.decode(msg_type, ext_reader),
+            },
+            .key_share => Self{
+                .key_share = try KeyShare.decode(msg_type, ext_reader, allocator),
+            },
+            else => unreachable, // TODO: implement decode() for other extensions
         };
     }
 };
@@ -92,6 +120,18 @@ pub const NamedGroup = enum(u16) {
     // Reserved Code Points
     ffdhe_private_use,
     ecdhe_private_use,
+
+    const Self = @This();
+
+    pub fn cast(value: u16) error{EnumCastFailed}!Self {
+        return switch (value) {
+            0x0017...0x0019,
+            0x001D...0x001E,
+            0x0100...0x0104,
+            => @intToEnum(Self, value),
+            else => return error.EnumCastFailed,
+        };
+    }
 };
 
 pub const SignatureScheme = enum(u16) {
@@ -169,7 +209,7 @@ test "Extension" {
     // supported versions
     buf.clear();
     var sv_ext = sv_ext: {
-        var sv = SupportedVersions.init();
+        var sv = SupportedVersions.init(.client_hello);
         try sv.append(SupportedVersions.TLS13);
         break :sv_ext Extension{ .supported_versions = sv };
     };
@@ -185,7 +225,7 @@ test "Extension" {
     // key share
     buf.clear();
     var ks_ext = ks_ext: {
-        var ks = KeyShare.init(testing.allocator);
+        var ks = KeyShare.init(.client_hello, testing.allocator);
         break :ks_ext Extension{ .key_share = ks };
     };
     defer ks_ext.deinit();

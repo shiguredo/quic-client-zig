@@ -1,6 +1,8 @@
 const std = @import("std");
 const mem = std.mem;
+const io = std.io;
 const testing = std.testing;
+const enums = std.enums;
 
 const extension = @import("extension.zig");
 
@@ -10,6 +12,15 @@ const ServerHello = @import("client_server_hello.zig").ServerHello;
 pub const HandshakeType = enum(u8) {
     client_hello = 0x01,
     server_hello = 0x02,
+
+    const Self = @This();
+
+    pub fn cast(value: u8) error{EnumCastFailed}!Self {
+        return switch (value) {
+            0x01...0x02 => @intToEnum(Self, value),
+            else => return error.EnumCastFailed,
+        };
+    }
 };
 
 pub const Handshake = union(HandshakeType) {
@@ -30,10 +41,10 @@ pub const Handshake = union(HandshakeType) {
         return instance;
     }
 
-    pub fn deinit(self: *Self) void {
-        switch (self.*) {
-            .client_hello => |*h| h.deinit(),
-            .server_hello => {},
+    pub fn deinit(self: Self) void {
+        switch (self) {
+            .client_hello => |h| h.deinit(),
+            .server_hello => |h| h.deinit(),
         }
     }
 
@@ -54,7 +65,7 @@ pub const Handshake = union(HandshakeType) {
 
     /// encode self to writer
     /// implemented only for .{.client_hello} now.
-    pub fn encode(self: *const Self, writer: anytype) @TypeOf(writer).Error!void {
+    pub fn encode(self: *const Self, writer: anytype) !void {
         const msg_type = @enumToInt(@as(HandshakeType, self.*));
         try writer.writeIntBig(u8, msg_type);
 
@@ -71,9 +82,25 @@ pub const Handshake = union(HandshakeType) {
 
         return;
     }
+
+    pub fn decode(reader: anytype, allocator: mem.Allocator) !Self {
+        const handshake_type = try HandshakeType.cast(try reader.readIntBig(u8));
+
+        const length = try reader.readIntBig(u24);
+        var stream = io.limitedReader(reader, @intCast(u64, length));
+        var s_reader = stream.reader();
+
+        return switch (handshake_type) {
+            .server_hello => s_h: {
+                const s_hello = try ServerHello.decode(s_reader, allocator);
+                break :s_h Self{ .server_hello = s_hello };
+            },
+            else => unreachable, // TODO: implement for other handshake types
+        };
+    }
 };
 
-test "client hello" {
+test "encode client hello" {
     const Buffer = @import("../buffer.zig").Buffer;
 
     var client_hello = try ClientHello.init(testing.allocator);
@@ -94,12 +121,12 @@ test "client hello" {
             break :signature_algorithms extension.Extension{ .signature_algorithms = sa };
         },
         supported_versions: {
-            var sv = extension.SupportedVersions.init();
+            var sv = extension.SupportedVersions.init(.client_hello);
             try sv.append(extension.SupportedVersions.TLS13);
             break :supported_versions extension.Extension{ .supported_versions = sv };
         },
         key_share: {
-            var ks = extension.KeyShare.init(testing.allocator);
+            var ks = extension.KeyShare.init(.client_hello, testing.allocator);
             break :key_share extension.Extension{ .key_share = ks };
         },
     };
@@ -133,4 +160,43 @@ test "client hello" {
         // zig fmt: on
 
     try testing.expectEqual(len, client_hello_hs.getEncLen());
+}
+
+test "decode server hello" {
+    var server_hello_bytes: [90]u8 = undefined;
+    // zig fmt: off
+    _ = try std.fmt.hexToBytes(
+        &server_hello_bytes,
+        "0200005603034e1f7043fa33e9d7d35e" ++
+        "e9d31701bd8a4650aa79b40dc7c1a8aa" ++
+        "4a35fa0a244a00130100002e002b0002" ++
+        "030400330024001d00207eac8ab90153" ++
+        "83235c836907686979a8f29200728cea" ++
+        "2b7d9952d75039974850",
+    );
+    // zig fmt: on
+    var stream = std.io.fixedBufferStream(&server_hello_bytes);
+    const s_hello = try Handshake.decode(stream.reader(), testing.allocator);
+    defer s_hello.deinit();
+
+    try testing.expectEqual(
+        HandshakeType.server_hello,
+        @as(HandshakeType, s_hello),
+    );
+
+    switch (s_hello) {
+        .server_hello => |s_hello| {
+            try testing.expectFmt(
+                "4e1f7043fa33e9d7d35ee9d31701bd8a" ++ "4650aa79b40dc7c1a8aa4a35fa0a244a",
+                "{x}",
+                .{std.fmt.fmtSliceHexLower(&s_hello.random_bytes)},
+            );
+            try testing.expectEqualSlices(
+                u8,
+                &[_]u8{ 0x13, 0x01 },
+                &s_hello.cipher_suite,
+            );
+        },
+        else => unreachable,
+    }
 }

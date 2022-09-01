@@ -47,7 +47,7 @@ pub const QuicTransportParameters = struct {
 };
 
 /// see https://www.rfc-editor.org/rfc/rfc9000.html#name-transport-parameter-definit
-pub const TransportParameterId = enum (u32) {
+pub const TransportParameterId = enum(u32) {
     original_dcid = 0x00,
     max_idle_timeout = 0x01,
     stateless_reset_token = 0x02,

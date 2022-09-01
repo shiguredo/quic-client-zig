@@ -2,14 +2,16 @@ const std = @import("std");
 const mem = std.mem;
 const crypto = std.crypto;
 const extension = @import("extension.zig");
+const Extension = extension.Extension;
+
+const LEGACY_VERSION: u16 = 0x0303;
+const RANDOM_FIELD_LEN = 32;
+const SessionId = std.BoundedArray(u8, 32);
+const Extensions = std.ArrayList(Extension);
 
 pub const ClientHello = struct {
-    const LEGACY_VERSION: u16 = 0x0303;
-    const RANDOM_FIELD_LEN = 32;
-    const SessionId = std.BoundedArray(u8, 32);
     const CipherSuites = std.BoundedArray([2]u8, 65536 / @sizeOf([2]u8));
     const CompressionMethods = std.BoundedArray(u8, 256);
-    const Extensions = std.ArrayList(extension.Extension);
 
     random_bytes: [32]u8,
     legacy_session_id: SessionId,
@@ -34,7 +36,7 @@ pub const ClientHello = struct {
         return instance;
     }
 
-    pub fn deinit(self: *Self) void {
+    pub fn deinit(self: Self) void {
         for (self.extensions.items) |*ext| {
             ext.deinit();
         }
@@ -45,13 +47,13 @@ pub const ClientHello = struct {
         try self.cipher_suites.append(cipher_suite);
     }
 
-    pub fn appendExtension(self: *Self, ext: extension.Extension) mem.Allocator.Error!void {
+    pub fn appendExtension(self: *Self, ext: Extension) mem.Allocator.Error!void {
         try self.extensions.append(ext);
     }
 
     pub fn appendExtensionSlice(
         self: *Self,
-        exts: []const extension.Extension,
+        exts: []const Extension,
     ) mem.Allocator.Error!void {
         try self.extensions.appendSlice(exts);
     }
@@ -83,7 +85,7 @@ pub const ClientHello = struct {
     }
 
     /// encode self to writer
-    pub fn encode(self: *const Self, writer: anytype) @TypeOf(writer).Error!void {
+    pub fn encode(self: *const Self, writer: anytype) !void {
         // legacy_version
         try writer.writeIntBig(u16, LEGACY_VERSION);
 
@@ -114,4 +116,61 @@ pub const ClientHello = struct {
     }
 };
 
-pub const ServerHello = struct {};
+pub const ServerHello = struct {
+    random_bytes: [RANDOM_FIELD_LEN]u8,
+    legacy_session_id_echo: SessionId,
+    cipher_suite: [2]u8,
+    extensions: Extensions,
+
+    const Self = @This();
+
+    const Error = error{
+        InvalidServerHelloFormat,
+    };
+
+    pub fn deinit(self: Self) void {
+        for (self.extensions.items) |ext| {
+            ext.deinit();
+        }
+        self.extensions.deinit();
+    }
+
+    pub fn decode(reader: anytype, allocator: mem.Allocator) !Self {
+        var instance: Self = undefined;
+
+        // read legacy version
+        const legacy_version = try reader.readIntBig(u16);
+        std.log.debug("{d}\n", .{legacy_version});
+        if (legacy_version != @as(u16, 0x0303)) return Error.InvalidServerHelloFormat;
+
+        // read random bytes
+        try reader.readNoEof(&instance.random_bytes);
+
+        // read session id
+        const session_id_len = try reader.readIntBig(u8);
+        instance.legacy_session_id_echo = try SessionId.init(@intCast(usize, session_id_len));
+        try reader.readNoEof(instance.legacy_session_id_echo.slice());
+
+        // read cipher suites
+        try reader.readNoEof(&instance.cipher_suite);
+
+        const legacy_commpression_method_len = try reader.readIntBig(u8);
+        if (legacy_commpression_method_len != @as(u8, 0)) return Error.InvalidServerHelloFormat;
+
+        const ext_len = try reader.readIntBig(u16);
+        var ext_list = std.ArrayList(Extension).init(allocator);
+
+        var ext_stream = std.io.limitedReader(reader, @intCast(u64, ext_len));
+        var ext_reader = ext_stream.reader();
+        while (Extension.decode(.server_hello, ext_reader, allocator)) |ext| {
+            try ext_list.append(ext);
+        } else |err| switch (err) {
+            error.EndOfStream => {}, // ok
+            else => return err,
+        }
+
+        instance.extensions = ext_list;
+
+        return instance;
+    }
+};
