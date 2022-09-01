@@ -104,7 +104,7 @@ pub const HP_KEY_LENGTH = 16;
 
 /// given header and payload, return encrypted packet array list
 /// header is from first byte to packet number field,
-/// payload is remain bytes
+/// payload is remainder (does not include packet number field)
 pub fn encryptInitialPacket(
     comptime AesGcm: type,
     header: []const u8,
@@ -242,6 +242,117 @@ test "encryptInitialPacket" {
         "e221af44860018ab0856972e194cd934",
         "{s}",
         .{std.fmt.fmtSliceHexLower(encrypted.items)},
+    );
+    // zig fmt: on
+}
+
+/// takes encrypted header and payload, returns decrypted packet array list
+/// header is from first byte to "length" field,
+/// payload is remainder (includes packet number)
+pub fn decryptInitialPacket(
+    comptime AesGcm: type,
+    header: []const u8,
+    payload: []const u8,
+    key: [AesGcm.key_length]u8,
+    iv: [AesGcm.nonce_length]u8,
+    hp_key: [HP_KEY_LENGTH]u8,
+    allocator: mem.Allocator,
+) !std.ArrayList(u8) {
+    // create header protection mask
+    const Aes = switch (AesGcm) {
+        std.crypto.aead.aes_gcm.Aes128Gcm => crypto.core.aes.Aes128,
+        std.crypto.aead.aes_gcm.Aes256Gcm => crypto.core.aes.Aes256,
+        else => @compileError("invalid AesGcm type"),
+    };
+    const sample = payload[4 .. 4 + 16];
+    const mask = deriveHpMask(Aes, hp_key, sample.*);
+
+    // create responce object
+    var decrypted_res = std.ArrayList(u8).init(allocator);
+    try decrypted_res.ensureTotalCapacityPrecise(
+        header.len + payload.len - AesGcm.tag_length,
+    );
+
+    // unprotect first byte and derive packet number length
+    try decrypted_res.appendSlice(header);
+    decrypted_res.items[0] = header[0] ^ (mask[0] & 0x0f);
+    const pn_length = @intCast(usize, decrypted_res.items[0] & 0x03) + 1;
+
+    // unprotect packet number
+    try decrypted_res.appendSlice(payload[0..pn_length]);
+    var packet_number = decrypted_res.items[decrypted_res.items.len - pn_length ..];
+    for (packet_number) |*val, idx| val.* ^= mask[1 + idx];
+
+    // create nonce
+    var nonce = [_]u8{0} ** AesGcm.nonce_length;
+    mem.copy(u8, &nonce, &iv);
+    for (nonce[nonce.len - pn_length ..]) |*val, idx| val.* ^= packet_number[idx];
+
+    // decrypt payload
+    const encrypted_payload = payload[pn_length .. payload.len - AesGcm.tag_length];
+    const auth_tag = tag: {
+        var dest = [_]u8{0} ** AesGcm.tag_length;
+        mem.copy(u8, &dest, payload[payload.len - AesGcm.tag_length ..]);
+        break :tag dest;
+    };
+    var decrypted_payload = try allocator.alloc(u8, encrypted_payload.len);
+    defer allocator.free(decrypted_payload);
+    try AesGcm.decrypt(
+        decrypted_payload,
+        encrypted_payload,
+        auth_tag,
+        decrypted_res.items,
+        nonce,
+        key,
+    );
+    try decrypted_res.appendSlice(decrypted_payload);
+
+    return decrypted_res;
+}
+
+test "decryptInitialPacket" {
+    // test vectors from https://www.rfc-editor.org/rfc/rfc9001#name-server-initial
+    var header = [_]u8{0} ** 18;
+    _ = try std.fmt.hexToBytes(&header, "cf000000010008f067a5502a4262b5004075");
+    var payload = [_]u8{0} ** 117;
+    // zig fmt: off
+    _ = try std.fmt.hexToBytes(
+        &payload,
+        "c0d95a482cd0991cd25b0aac406a" ++
+        "5816b6394100f37a1c69797554780bb3" ++ "8cc5a99f5ede4cf73c3ec2493a1839b3" ++
+        "dbcba3f6ea46c5b7684df3548e7ddeb9" ++ "c3bf9c73cc3f3bded74b562bfb19fb84" ++
+        "022f8ef4cdd93795d77d06edbb7aaf2f" ++ "58891850abbdca3d20398c276456cbc4" ++
+        "2158407dd074ee",
+    );
+    // zig fmt: on
+
+    var tls_provider = tls.Provider{};
+    tls_provider.setUpInitial(
+        &[_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 },
+    );
+
+    const initial_keys = tls_provider.server_initial.?;
+
+    var decrypted = try decryptInitialPacket(
+        Aes128Gcm,
+        &header,
+        &payload,
+        initial_keys.key,
+        initial_keys.iv,
+        initial_keys.hp,
+        testing.allocator,
+    );
+    defer decrypted.deinit();
+
+    // zig fmt: off
+    try testing.expectFmt(
+        "c1000000010008f067a5502a4262b50040750001" ++ // header (include packet number)
+        "02000000000600405a020000560303ee" ++ "fce7f7b37ba1d1632e96677825ddf739" ++ // payload
+        "88cfc79825df566dc5430b9a045a1200" ++ "130100002e00330024001d00209d3c94" ++
+        "0d89690b84d08a60993c144eca684d10" ++ "81287c834d5311bcf32bb9da1a002b00" ++
+        "020304",
+        "{x}",
+        .{std.fmt.fmtSliceHexLower(decrypted.items)},
     );
     // zig fmt: on
 }
