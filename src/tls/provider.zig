@@ -83,12 +83,12 @@ pub const Provider = struct {
                 break :signature_algorithms extension.Extension{ .signature_algorithms = sa };
             },
             supported_versions: {
-                var sv = extension.SupportedVersions.init();
+                var sv = extension.SupportedVersions.init(.client_hello);
                 try sv.append(extension.SupportedVersions.TLS13);
                 break :supported_versions extension.Extension{ .supported_versions = sv };
             },
             key_share: {
-                var ks = extension.KeyShare.init(allocator);
+                var ks = extension.KeyShare.init(.client_hello, allocator);
                 var x25519_pub = std.ArrayList(u8).init(allocator);
                 try x25519_pub.appendSlice(&my_kp.public_key);
                 try ks.append(.{ .group = .x25519, .key_exchange = x25519_pub });
