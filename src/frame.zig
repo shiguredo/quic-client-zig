@@ -37,7 +37,7 @@ pub const PaddingFrame = struct {
     const Self = @This();
 
     pub fn init(length: usize) Self {
-        return .{.length = length};
+        return .{ .length = length };
     }
 
     pub fn encode(self: Self, writer: anytype) @TypeOf(writer).Error!void {

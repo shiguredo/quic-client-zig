@@ -66,7 +66,7 @@ pub const QuicSocket = struct {
             .packet_number = 0x00,
             .payload = p: {
                 var frames = std.ArrayList(frame.Frame).init(allocator);
-                try frames.append(.{.crypto = c_hello_frame});
+                try frames.append(.{ .crypto = c_hello_frame });
                 break :p frames;
             },
         };
@@ -79,6 +79,6 @@ pub const QuicSocket = struct {
 };
 
 test "connect()" {
-    var sock = try QuicSocket.init(net.Address.initIp4(.{127, 0, 0, 1}, 4433));
+    var sock = try QuicSocket.init(net.Address.initIp4(.{ 127, 0, 0, 1 }, 4433));
     try sock.connnect(testing.allocator);
 }

@@ -28,7 +28,6 @@ const MIN_UDP_PAYLOAD_LENGTH = 1200;
 pub const QUIC_VERSION_1 = 0x00000001;
 pub const ConnectionId = std.BoundedArray(u8, MAX_CID_LENGTH);
 
-
 pub const InitialPacket = struct {
     reserved_bits: u2 = 0x0,
     pn_length: u2,
@@ -132,7 +131,10 @@ pub const InitialPacket = struct {
         var first_byte: u8 = 0;
         first_byte |= @intCast(u8, @enumToInt(HeaderForm.long)) << 7;
         first_byte |= 0b01000000;
-        first_byte |= @intCast(u8, @enumToInt(LongHeaderPacketTypes.initial),) << 4;
+        first_byte |= @intCast(
+            u8,
+            @enumToInt(LongHeaderPacketTypes.initial),
+        ) << 4;
         first_byte |= @intCast(u8, self.reserved_bits) << 2;
         first_byte |= @intCast(u8, self.pn_length);
         return first_byte;
