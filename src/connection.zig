@@ -79,6 +79,9 @@ pub const QuicSocket = struct {
 };
 
 test "connect()" {
+    // To run this test, set QUIC_CONNECTION_TEST_ENABLED=1
+    if (std.os.getenv("QUIC_CONNECTION_TEST_ENABLED")) |_| {} else return error.SkipZigTest;
+
     var sock = try QuicSocket.init(net.Address.initIp4(.{ 127, 0, 0, 1 }, 4433));
     try sock.connnect(testing.allocator);
 }
