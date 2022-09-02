@@ -20,7 +20,7 @@ pub const Provider = struct {
 
     const Self = @This();
 
-    const Error = error{KeyNotInstalled};
+    pub const Error = error{KeyNotInstalled};
 
     pub const QuicKeys = struct {
         secret: [Hmac.key_length]u8 = undefined,

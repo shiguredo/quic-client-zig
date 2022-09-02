@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const mem = std.mem;
+const io = std.io;
 const testing = std.testing;
 
 const buffer = @import("buffer.zig");
@@ -129,4 +130,50 @@ test "convert to variable length int from u64" {
         VariableLengthInt{ .value = 0x010448ad, .len = 4 },
         v_int,
     );
+}
+
+/// Reader that saves its reading history to
+/// the inner ArrayList(u8)
+pub fn SaveHistoryStream(comptime ReaderType: type) type {
+    return struct {
+        inner_reader: ReaderType,
+        history_array: std.ArrayList(u8),
+
+        pub const Error = ReaderType.Error || mem.Allocator.Error;
+        pub const Reader = io.Reader(*Self, Error, read);
+
+        const Self = @This();
+
+        pub fn read(self: *Self, dest: []u8) Error!usize {
+            const count = try self.inner_reader.read(dest);
+            try self.history_array.appendSlice(dest[0..count]);
+            return count;
+        }
+
+        pub fn reader(self: *Self) Reader {
+            return .{ .context = self };
+        }
+
+        pub fn history(self: Self) []const u8 {
+            return self.history_array.items;
+        }
+
+        pub fn deinit(self: *Self) void {
+            self.history_array.deinit();
+        }
+
+        pub fn clearAndFree(self: *Self) void {
+            self.history_array.clearAndFree();
+        }
+    };
+}
+
+pub fn saveHistoryStream(
+    inner_reader: anytype,
+    allocator: mem.Allocator,
+) SaveHistoryStream(@TypeOf(inner_reader)) {
+    return .{
+        .inner_reader = inner_reader,
+        .history_array = std.ArrayList(u8).init(allocator),
+    };
 }
