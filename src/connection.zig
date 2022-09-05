@@ -56,10 +56,9 @@ pub const QuicSocket = struct {
             };
             break :ch ch_frame;
         };
-        defer c_hello_frame.deinit();
 
-        var ip = packet.InitialPacket{
-            .pn_length = 0x00,
+        var ip = packet.LongHeaderPacket{
+            .flags = packet.LongHeaderFlags.initial(1),
             .dst_cid = dcid,
             .src_cid = scid,
             .token = std.ArrayList(u8).init(allocator),
@@ -74,6 +73,7 @@ pub const QuicSocket = struct {
 
         var buf = Buffer(65536).init();
         try ip.encodeEncrypted(buf.writer(), allocator, self.tls_provider);
+        try buf.writer().writeByteNTimes(0x00, 1200);
         _ = try self.dg_socket.write(buf.getUnreadSlice());
     }
 };

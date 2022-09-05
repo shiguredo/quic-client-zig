@@ -23,15 +23,53 @@ const LongHeaderPacketTypes = enum(u2) {
     retry = 0x03,
 };
 
+pub const LongHeaderFlags = packed struct {
+    pn_length: u2,
+    reserved: u2 = 0b00,
+    packet_type: LongHeaderPacketTypes,
+    fixed_bit: u1 = 0b1,
+    header_form: HeaderForm = .long,
+
+    const Self = @This();
+
+    pub fn initial(pn_length: usize) Self {
+        return .{
+            .pn_length = switch (pn_length) {
+                1...4 => @intCast(u2, pn_length - 1),
+                else => unreachable,
+            },
+            .packet_type = .initial,
+        };
+    }
+
+    pub fn toU8(self: Self) u8 {
+        return @bitCast(u8, self);
+    }
+
+    pub fn fromU8(flags_byte: u8) Self {
+        const flags = @bitCast(Self, flags_byte);
+        return flags;
+    }
+
+    test "convert initial packet flags to u8" {
+        const flags = Self{
+            .pn_length = 0b10,
+            .packet_type = .initial,
+        };
+        try testing.expectEqual(@as(u8, 0b11000010), flags.toU8());
+        const flags2 = Self.fromU8(0b11000001);
+        try testing.expectEqual(@as(u2, 0b01), flags2.pn_length);
+    }
+};
+
 const MAX_CID_LENGTH = 255;
 const MIN_UDP_PAYLOAD_LENGTH = 1200;
 
 pub const QUIC_VERSION_1 = 0x00000001;
 pub const ConnectionId = std.BoundedArray(u8, MAX_CID_LENGTH);
 
-pub const InitialPacket = struct {
-    reserved_bits: u2 = 0x0,
-    pn_length: u2,
+pub const LongHeaderPacket = struct {
+    flags: LongHeaderFlags,
 
     version: u32 = QUIC_VERSION_1,
     dst_cid: ConnectionId,
@@ -42,36 +80,6 @@ pub const InitialPacket = struct {
     payload: std.ArrayList(frame.Frame),
 
     const Self = @This();
-
-    pub const Flags = packed struct {
-        pn_length: u2,
-        reserved: u2 = 0b00,
-        packet_type: u2 = 0b00,
-        fixed_bit: u1 = 0b1,
-        header_form: HeaderForm = .long,
-
-        pub fn toU8(self: Flags) u8 {
-            return @bitCast(u8, self);
-        }
-
-        pub fn fromU8(flags_byte: u8) error{InvalidFlags}!Flags {
-            const flags = @bitCast(Flags, flags_byte);
-            if (flags.reserved != 0b00 or
-                flags.packet_type != 0b00 or
-                flags.fixed_bit != 0b1)
-                return error.InvalidFlags;
-            return flags;
-        }
-
-        test "convert initial packet flags to u8" {
-            const flags = Flags{
-                .pn_length = 0b10,
-            };
-            try testing.expectEqual(@as(u8, 0b11000010), flags.toU8());
-            const flags2 = try Flags.fromU8(0b11000001);
-            try testing.expectEqual(@as(u2, 0b01), flags2.pn_length);
-        }
-    };
 
     pub fn deinit(self: Self) void {
         self.token.deinit();
@@ -85,6 +93,8 @@ pub const InitialPacket = struct {
         allocator: mem.Allocator,
         tls_provider: tls.Provider,
     ) !void {
+        const packet_type = self.flags.packet_type;
+
         // make plain text payload array
         // plain text is (packet number) + (frame payloads) + (padding)
         var plain_text = std.ArrayList(u8).init(allocator);
@@ -94,23 +104,25 @@ pub const InitialPacket = struct {
             try frame_item.encode(plain_text.writer());
         }
 
-        // create padding field
-        const len_without_length_field = blk: {
-            var temp: usize = 0;
-            temp += try self.headerLengthWithoutLengthField();
-            temp += plain_text.items.len;
-            break :blk temp;
-        };
-        if (len_without_length_field + 2 < MIN_UDP_PAYLOAD_LENGTH) {
-            // if UDP payload less than 1200, add padding
-            // + 2 is the min length of "length" field
-            const padding_len = MIN_UDP_PAYLOAD_LENGTH - len_without_length_field;
-            const padding = frame.PaddingFrame.init(padding_len);
-            try padding.encode(plain_text.writer());
+        if (packet_type == .initial) {
+            // Client initial packet's UDP payload size must be 1200 bytes or larger.
+            // add padding to meet this constraint
+            const len_without_length_field = blk: { // calculate for initial packet
+                var temp: usize = 0;
+                temp += try self.headerLengthWithoutLengthField();
+                temp += plain_text.items.len;
+                break :blk temp;
+            };
+            if (len_without_length_field + 2 < MIN_UDP_PAYLOAD_LENGTH) {
+                // if UDP payload less than 1200, add padding
+                // + 2 is the min length of "length" field
+                const padding_len = MIN_UDP_PAYLOAD_LENGTH - len_without_length_field;
+                const padding = frame.PaddingFrame.init(padding_len);
+                try padding.encode(plain_text.writer());
+            }
         }
 
         // create header
-        const token_length = try self.tokenLengthVli();
         const length_field = plain_text.items.len + self.decodePnLength() + aes_gcm.Aes128Gcm.tag_length;
         const rem_length = try VariableLengthInt.fromInt(length_field);
         var pn_array = [_]u8{0} ** @sizeOf(u32);
@@ -125,8 +137,13 @@ pub const InitialPacket = struct {
         try h_writer.writeAll(self.dst_cid.constSlice());
         try h_writer.writeIntBig(u8, @intCast(u8, self.src_cid.len));
         try h_writer.writeAll(self.src_cid.constSlice());
-        try token_length.encode(h_writer);
-        try h_writer.writeAll(self.token.items);
+        if (packet_type == .initial) {
+            // token field appears only in Initial packet
+            const token_length = try self.tokenLengthVli();
+
+            try token_length.encode(h_writer);
+            try h_writer.writeAll(self.token.items);
+        }
         try rem_length.encode(h_writer);
         try h_writer.writeAll(pn_array[pn_array.len - self.decodePnLength() ..]);
 
@@ -206,7 +223,7 @@ pub const InitialPacket = struct {
         defer decrypted_packet.deinit();
 
         // get unprotected first byte and packet number
-        const first_byte = try Flags.fromU8(decrypted_packet.items[0]);
+        const first_byte = LongHeaderFlags.fromU8(decrypted_packet.items[0]);
         const pn_length_decoded = @intCast(usize, first_byte.pn_length) + 1;
         const p_number = pn: {
             var pn_array = [_]u8{0} ** @sizeOf(u32);
@@ -230,7 +247,7 @@ pub const InitialPacket = struct {
         };
 
         return Self{
-            .pn_length = first_byte.pn_length,
+            .flags = first_byte,
             .version = version,
             .dst_cid = dcid,
             .src_cid = scid,
@@ -251,15 +268,12 @@ pub const InitialPacket = struct {
 
     /// return first byte as u8
     pub fn firstByte(self: *const Self) u8 {
-        var flags = Flags{
-            .pn_length = self.pn_length,
-        };
-        return flags.toU8();
+        return self.flags.toU8();
     }
 
     /// decode packet number length to usize
     pub fn decodePnLength(self: *const Self) usize {
-        return @intCast(usize, self.pn_length) + 1;
+        return @intCast(usize, self.flags.pn_length) + 1;
     }
 
     /// return token length in VariableLengthInt struct
@@ -302,10 +316,10 @@ test "decode initial packet" {
     var stream = std.io.fixedBufferStream(&server_initial);
     var tls_provider = tls.Provider{};
     tls_provider.setUpInitial("\x76\x49\x73\x32\xb6\x4c\x00\x9c");
-    const initial_packet = try InitialPacket.decodeEncrypted(stream.reader(), testing.allocator, tls_provider);
+    const initial_packet = try LongHeaderPacket.decodeEncrypted(stream.reader(), testing.allocator, tls_provider);
     defer initial_packet.deinit();
 
-    try testing.expectEqual(@as(u2, 0b01), initial_packet.pn_length);
+    try testing.expectEqual(@as(u2, 0b01), initial_packet.flags.pn_length);
     try testing.expectEqual(@as(u32, 0x01), initial_packet.version);
     try testing.expectEqualSlices(
         u8,
