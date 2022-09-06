@@ -6,33 +6,21 @@ const testing = std.testing;
 const util = @import("util.zig");
 const tls = @import("tls.zig");
 
+const Sha256 = crypto.hash.sha2.Sha256;
 pub const Hmac = crypto.auth.hmac.sha2.HmacSha256;
 pub const Hkdf = crypto.kdf.hkdf.HkdfSha256;
 
 const Aes128Gcm = std.crypto.aead.aes_gcm.Aes128Gcm;
 
+// zig fmt: off
 pub const INITIAL_SALT_V1 = [_]u8{
-    0x38,
-    0x76,
-    0x2c,
-    0xf7,
-    0xf5,
-    0x59,
-    0x34,
-    0xb3,
-    0x4d,
-    0x17,
-    0x9a,
-    0xe6,
-    0xa4,
-    0xc8,
-    0x0c,
-    0xad,
-    0xcc,
-    0xbb,
-    0x7f,
-    0x0a,
+    0x38, 0x76, 0x2c, 0xf7,
+    0xf5, 0x59, 0x34, 0xb3,
+    0x4d, 0x17, 0x9a, 0xe6,
+    0xa4, 0xc8, 0x0c, 0xad,
+    0xcc, 0xbb, 0x7f, 0x0a,
 };
+// zig fmt: on
 
 pub fn hkdfExpandLabel(
     out: []u8,
@@ -78,26 +66,71 @@ test "HKDF-Expand-Label" {
     var client_key: [16]u8 = undefined;
     hkdfExpandLabel(&client_key, client_initial, "quic key", "");
 
-    const expected = [_]u8{
-        0xb1,
-        0x4b,
-        0x91,
-        0x81,
-        0x24,
-        0xfd,
-        0xa5,
-        0xc8,
-        0xd7,
-        0x98,
-        0x47,
-        0x60,
-        0x2f,
-        0xa3,
-        0x52,
-        0x0b,
+    // zig fmt: off
+    const expected = [_]u8{ 
+        0xb1, 0x4b, 0x91, 0x81,
+        0x24, 0xfd, 0xa5, 0xc8,
+        0xd7, 0x98, 0x47, 0x60,
+        0x2f, 0xa3, 0x52, 0x0b,
     };
+    // zig fmt: on
 
     try testing.expectEqual(expected, client_key);
+}
+
+pub fn deriveSecret(
+    out: *[Sha256.digest_length]u8,
+    secret: [Hmac.key_length]u8,
+    label: []const u8,
+    message: []const u8,
+) void {
+    var h: [Sha256.digest_length]u8 = undefined;
+    Sha256.hash(message, &h, .{});
+
+    hkdfExpandLabel(out, secret, label, &h);
+}
+
+// test vectors from https://www.rfc-editor.org/rfc/rfc8448.html#section-3
+test "Derive-Secret" {
+    const handshake_secret =
+        "\x1d\xc8\x26\xe9\x36\x06\xaa\x6f\xdc\x0a\xad\xc1\x2f\x74\x1b" ++
+        "\x01\x04\x6a\xa6\xb9\x9f\x69\x1e\xd2\x21\xa9\xf0\xca\x04\x3f" ++
+        "\xbe\xac";
+    const client_hello_bytes =
+        "\x01\x00\x00\xc0\x03\x03\xcb\x34\xec\xb1\xe7\x81\x63\xba\x1c\x38\xc6\xda\xcb\x19\x6a" ++
+        "\x6d\xff\xa2\x1a\x8d\x99\x12\xec\x18\xa2\xef\x62\x83\x02\x4d\xec\xe7\x00\x00\x06\x13" ++
+        "\x01\x13\x03\x13\x02\x01\x00\x00\x91\x00\x00\x00\x0b\x00\x09\x00\x00\x06\x73\x65\x72" ++
+        "\x76\x65\x72\xff\x01\x00\x01\x00\x00\x0a\x00\x14\x00\x12\x00\x1d\x00\x17\x00\x18\x00" ++
+        "\x19\x01\x00\x01\x01\x01\x02\x01\x03\x01\x04\x00\x23\x00\x00\x00\x33\x00\x26\x00\x24" ++
+        "\x00\x1d\x00\x20\x99\x38\x1d\xe5\x60\xe4\xbd\x43\xd2\x3d\x8e\x43\x5a\x7d\xba\xfe\xb3" ++
+        "\xc0\x6e\x51\xc1\x3c\xae\x4d\x54\x13\x69\x1e\x52\x9a\xaf\x2c\x00\x2b\x00\x03\x02\x03" ++
+        "\x04\x00\x0d\x00\x20\x00\x1e\x04\x03\x05\x03\x06\x03\x02\x03\x08\x04\x08\x05\x08\x06" ++
+        "\x04\x01\x05\x01\x06\x01\x02\x01\x04\x02\x05\x02\x06\x02\x02\x02\x00\x2d\x00\x02\x01" ++
+        "\x01\x00\x1c\x00\x02\x40\x01";
+    const server_hello_bytes =
+        "\x02\x00\x00\x56\x03\x03\xa6\xaf\x06\xa4\x12\x18\x60\xdc\x5e\x6e\x60\x24\x9c\xd3\x4c" ++
+        "\x95\x93\x0c\x8a\xc5\xcb\x14\x34\xda\xc1\x55\x77\x2e\xd3\xe2\x69\x28\x00\x13\x01\x00" ++
+        "\x00\x2e\x00\x33\x00\x24\x00\x1d\x00\x20\xc9\x82\x88\x76\x11\x20\x95\xfe\x66\x76\x2b" ++
+        "\xdb\xf7\xc6\x72\xe1\x56\xd6\xcc\x25\x3b\x83\x3d\xf1\xdd\x69\xb1\xb0\x4e\x75\x1f\x0f" ++
+        "\x00\x2b\x00\x02\x03\x04";
+    const message = try mem.concat(
+        testing.allocator,
+        u8,
+        &[_][]const u8{ mem.span(client_hello_bytes), mem.span(server_hello_bytes) },
+    );
+    defer testing.allocator.free(message);
+    var client_handshake_traffic_secret: [Sha256.digest_length]u8 = undefined;
+    deriveSecret(
+        &client_handshake_traffic_secret,
+        handshake_secret.*,
+        "c hs traffic",
+        message,
+    );
+    try testing.expectFmt(
+        "b3eddb126e067f35a780b3abf45e2d8f3b1a950738f52e9600746a0e27a55a21",
+        "{x}",
+        .{std.fmt.fmtSliceHexLower(&client_handshake_traffic_secret)},
+    );
 }
 
 pub const HP_KEY_LENGTH = 16;
