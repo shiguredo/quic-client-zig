@@ -74,15 +74,19 @@ pub const LongHeaderPacket = struct {
     version: u32 = QUIC_VERSION_1,
     dst_cid: ConnectionId,
     src_cid: ConnectionId,
-    token: std.ArrayList(u8),
+    token: ?std.ArrayList(u8), // only for Initial Packet
     packet_number: u32,
 
     payload: std.ArrayList(frame.Frame),
 
     const Self = @This();
 
+    pub const Error = error{
+        InvalidHeaderFormat,
+    };
+
     pub fn deinit(self: Self) void {
-        self.token.deinit();
+        if (self.token) |token| token.deinit();
         for (self.payload.items) |*f| f.deinit();
         self.payload.deinit();
     }
@@ -139,10 +143,9 @@ pub const LongHeaderPacket = struct {
         try h_writer.writeAll(self.src_cid.constSlice());
         if (packet_type == .initial) {
             // token field appears only in Initial packet
-            const token_length = try self.tokenLengthVli();
-
+            const token_length = (try self.tokenLengthVlInt()).?;
             try token_length.encode(h_writer);
-            try h_writer.writeAll(self.token.items);
+            try h_writer.writeAll(self.token.?.items);
         }
         try rem_length.encode(h_writer);
         try h_writer.writeAll(pn_array[pn_array.len - self.decodePnLength() ..]);
@@ -177,7 +180,13 @@ pub const LongHeaderPacket = struct {
         var h_reader = h_stream.reader();
 
         // read header
-        _ = try h_reader.readIntBig(u8); // first_byte
+        const packet_type = packet_type: {
+            const protected_flags =
+                LongHeaderFlags.fromU8(try h_reader.readIntBig(u8));
+            if (protected_flags.header_form == .short)
+                return Error.InvalidHeaderFormat;
+            break :packet_type protected_flags.packet_type;
+        };
         const version = try h_reader.readIntBig(u32);
         const dcid_length = try h_reader.readIntBig(u8);
         var dcid = try ConnectionId.init(@intCast(usize, dcid_length));
@@ -185,13 +194,14 @@ pub const LongHeaderPacket = struct {
         const scid_length = try h_reader.readIntBig(u8);
         var scid = try ConnectionId.init(@intCast(usize, scid_length));
         try h_reader.readNoEof(scid.slice());
-        const token_length = try VariableLengthInt.decode(h_reader);
-        const token = token: {
+        const token_length =
+            if (packet_type == .initial) try VariableLengthInt.decode(h_reader) else null;
+        const token = if (packet_type == .initial) token: {
             var temp = std.ArrayList(u8).init(allocator);
-            try temp.resize(@intCast(usize, token_length.value));
+            try temp.resize(@intCast(usize, token_length.?.value));
             try h_reader.readNoEof(temp.items);
             break :token temp;
-        };
+        } else null;
         const length = try VariableLengthInt.decode(h_reader);
 
         // get what is read as header bytes
@@ -277,27 +287,30 @@ pub const LongHeaderPacket = struct {
     }
 
     /// return token length in VariableLengthInt struct
-    pub fn tokenLengthVli(
+    pub fn tokenLengthVlInt(
         self: *const Self,
-    ) VariableLengthInt.Error!VariableLengthInt {
-        return VariableLengthInt.fromInt(self.token.items.len);
+    ) VariableLengthInt.Error!?VariableLengthInt {
+        return if (self.token) |token|
+            try VariableLengthInt.fromInt(token.items.len)
+        else
+            null;
     }
 
     /// return (header without "length" field length) + (not padded payload length)
     pub fn headerLengthWithoutLengthField(self: *const Self) !usize {
-        // zig fmt: off
-        const len_without_length_field: usize = 
-            ( 7    // first byte + version field + dcid len field + scid len field
-            + self.dst_cid.len
-            + self.src_cid.len
-            + token_len: {
-                const token_length = try self.tokenLengthVli();
-                break :token_len token_length.len;
-            }
-            + self.token.items.len
-            + self.decodePnLength());
-        // zig fmt: on
-        return len_without_length_field;
+        var ret: usize = 0;
+        ret += 7; // first byte + version field + dcid len field + scid len field
+        ret += self.dst_cid.len;
+        ret += self.src_cid.len;
+        ret += if (self.token) |token| token_field: {
+            var temp: usize = 0;
+            const token_length = (try self.tokenLengthVlInt()).?;
+            temp += token_length.len;
+            temp += token.items.len;
+            break :token_field temp;
+        } else 0;
+        ret += self.decodePnLength();
+        return ret;
     }
 };
 

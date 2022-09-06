@@ -73,7 +73,6 @@ pub const QuicSocket = struct {
 
         var buf = Buffer(65536).init();
         try ip.encodeEncrypted(buf.writer(), allocator, self.tls_provider);
-        try buf.writer().writeByteNTimes(0x00, 1200);
         _ = try self.dg_socket.write(buf.getUnreadSlice());
     }
 };
