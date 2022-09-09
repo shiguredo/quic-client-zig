@@ -6,7 +6,7 @@ const testing = std.testing;
 const util = @import("util.zig");
 const tls = @import("tls.zig");
 
-const Sha256 = crypto.hash.sha2.Sha256;
+pub const Sha256 = crypto.hash.sha2.Sha256;
 pub const Hmac = crypto.auth.hmac.sha2.HmacSha256;
 pub const Hkdf = crypto.kdf.hkdf.HkdfSha256;
 
