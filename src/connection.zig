@@ -27,6 +27,11 @@ pub const QuicSocket = struct {
         };
     }
 
+    pub fn close(self: *Self) void {
+        self.tls_provider.deinit();
+        self.dg_socket.close();
+    }
+
     pub fn connnect(self: *Self, allocator: mem.Allocator) !void {
         const scid = scid: {
             var id = try packet.ConnectionId.init(8);
@@ -41,6 +46,7 @@ pub const QuicSocket = struct {
 
         // setup tls
         self.tls_provider.setUpInitial(dcid.constSlice());
+
         self.tls_provider.x25519_keypair = try crypto.dh.X25519.KeyPair.create(null);
 
         var c_hello_frame = ch: {
@@ -57,7 +63,7 @@ pub const QuicSocket = struct {
             break :ch ch_frame;
         };
 
-        var ip = packet.LongHeaderPacket{
+        var c_initial = packet.LongHeaderPacket{
             .flags = packet.LongHeaderFlags.initial(1),
             .dst_cid = dcid,
             .src_cid = scid,
@@ -69,11 +75,41 @@ pub const QuicSocket = struct {
                 break :p frames;
             },
         };
-        defer ip.deinit();
+        defer c_initial.deinit();
 
-        var buf = Buffer(65536).init();
-        try ip.encodeEncrypted(buf.writer(), allocator, self.tls_provider);
-        _ = try self.dg_socket.write(buf.getUnreadSlice());
+        var w_buf = Buffer(65536).init();
+        try c_initial.encodeEncrypted(w_buf.writer(), allocator, self.tls_provider);
+        _ = try self.dg_socket.write(w_buf.getUnreadSlice());
+
+        var r_buf = [_]u8{0} ** 65536;
+        var count: usize = 0;
+        while (count == 0) : (count += try self.dg_socket.reader().read(r_buf[count..])) {}
+        var stream = std.io.fixedBufferStream(r_buf[0..count]);
+
+        var s_initial = try packet.LongHeaderPacket.decodeEncrypted(
+            stream.reader(),
+            allocator,
+            self.tls_provider,
+        );
+        defer s_initial.deinit();
+
+        for (s_initial.payload.items) |f| {
+            switch (f) {
+                .crypto => |c| try self.tls_provider.handleServerHello(c.data.items, allocator),
+                else => {},
+            }
+        }
+
+        self.tls_provider.setUpEarly(null);
+        try self.tls_provider.createSharedKey();
+        try self.tls_provider.setUpHandshake(allocator);
+
+        var s_handshake = try packet.LongHeaderPacket.decodeEncrypted(
+            stream.reader(),
+            allocator,
+            self.tls_provider,
+        );
+        defer s_handshake.deinit();
     }
 };
 
@@ -82,5 +118,6 @@ test "connect()" {
     if (std.os.getenv("QUIC_CONNECTION_TEST_ENABLED")) |_| {} else return error.SkipZigTest;
 
     var sock = try QuicSocket.init(net.Address.initIp4(.{ 127, 0, 0, 1 }, 4433));
+    defer sock.close();
     try sock.connnect(testing.allocator);
 }

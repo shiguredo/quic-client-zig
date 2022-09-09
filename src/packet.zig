@@ -218,8 +218,11 @@ pub const LongHeaderPacket = struct {
         defer allocator.free(encrypted_payload);
 
         // because this is client, use server initial keys to decrypt recieved packet
-        const keys =
-            tls_provider.server_initial orelse return tls.Provider.Error.KeyNotInstalled;
+        const keys = switch (packet_type) {
+            .initial => tls_provider.server_initial orelse return tls.Provider.Error.KeyNotInstalled,
+            .handshake => tls_provider.server_handshake orelse return tls.Provider.Error.KeyNotInstalled,
+            else => unreachable,
+        };
 
         const decrypted_packet = try q_crypto.decryptInitialPacket(
             aes_gcm.Aes128Gcm,

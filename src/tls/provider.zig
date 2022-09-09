@@ -47,6 +47,11 @@ pub const Provider = struct {
         const HP_KEY_LENGTH = 16;
     };
 
+    pub fn deinit(self: *Self) void {
+        if (self.client_hello_bytes) |h| h.deinit();
+        if (self.server_hello_bytes) |h| h.deinit();
+    }
+
     /// derives initial secret from client's destination connection ID
     /// and set it to self.initial_secret
     pub fn setUpInitial(self: *Self, key: []const u8) void {
@@ -134,7 +139,7 @@ pub const Provider = struct {
     }
 
     pub fn createClientHello(
-        self: Self,
+        self: *Self,
         allocator: mem.Allocator,
         quic_scid: packet.ConnectionId,
     ) !tls.Handshake {
@@ -179,7 +184,34 @@ pub const Provider = struct {
 
         try c_hello.appendExtensionSlice(&extensions);
 
-        return tls.Handshake{ .client_hello = c_hello };
+        var hs = tls.Handshake{ .client_hello = c_hello };
+
+        self.client_hello_bytes = blk: {
+            var temp = std.ArrayList(u8).init(allocator);
+            try hs.encode(temp.writer());
+            break :blk temp;
+        };
+
+        return hs;
+    }
+
+    pub fn handleServerHello(self: *Self, s_hello_bytes: []const u8, allocator: mem.Allocator) !void {
+        self.server_hello_bytes = blk: {
+            var temp = std.ArrayList(u8).init(allocator);
+            try temp.appendSlice(s_hello_bytes);
+            break :blk temp;
+        };
+
+        var stream = std.io.fixedBufferStream(s_hello_bytes);
+        const s_hello = try tls.Handshake.decode(stream.reader(), allocator);
+        defer s_hello.deinit();
+
+        for (s_hello.server_hello.extensions.items) |ext| {
+            if (@as(extension.ExtensionType, ext) == .key_share) {
+                self.x25519_peer = [_]u8{0} ** 32;
+                mem.copy(u8, &self.x25519_peer.?, ext.key_share.server_share.?.key_exchange.items);
+            }
+        }
     }
 };
 
