@@ -106,6 +106,10 @@ pub const VariableLengthInt = struct {
             .len = length,
         };
     }
+
+    pub fn toInt(self: Self, comptime T: type) T {
+        return @intCast(T, self.value);
+    }
 };
 
 test "decode u8 array to variable length int" {

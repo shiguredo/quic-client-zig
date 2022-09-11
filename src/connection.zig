@@ -110,6 +110,30 @@ pub const QuicSocket = struct {
             self.tls_provider,
         );
         defer s_handshake.deinit();
+
+        var c_initial_2 = packet.LongHeaderPacket{
+            .flags = packet.LongHeaderFlags.initial(1),
+            .dst_cid = dcid,
+            .src_cid = scid,
+            .token = std.ArrayList(u8).init(allocator),
+            .packet_number = 0x01,
+            .payload = p: {
+                var frames = std.ArrayList(frame.Frame).init(allocator);
+                const ack_frame = frame.AckFrame{
+                    .largest_ack = try util.VariableLengthInt.fromInt(0),
+                    .ack_delay = try util.VariableLengthInt.fromInt(400),
+                    .first_ack_range = try util.VariableLengthInt.fromInt(0),
+                    .ack_ranges = std.ArrayList(frame.AckFrame.AckRange).init(allocator),
+                };
+                try frames.append(.{ .ack = ack_frame });
+                break :p frames;
+            },
+        };
+        defer c_initial_2.deinit();
+
+        w_buf.clear();
+        try c_initial_2.encodeEncrypted(w_buf.writer(), allocator, self.tls_provider);
+        _ = try self.dg_socket.write(w_buf.getUnreadSlice());
     }
 };
 

@@ -32,6 +32,7 @@ pub const Frame = union(FrameTypes) {
 
     pub fn encode(self: *const Self, writer: anytype) !void {
         return switch (self.*) {
+            .ack => |f| f.encode(writer),
             .padding => |f| f.encode(writer),
             .crypto => |f| f.encode(writer),
             else => unreachable, // TODO: implement
@@ -67,10 +68,8 @@ pub const PaddingFrame = struct {
 };
 
 pub const AckFrame = struct {
-    type_id: VariableLengthInt, // 0x02 ... 0x03
     largest_ack: VariableLengthInt,
     ack_delay: VariableLengthInt,
-    ack_range_count: VariableLengthInt,
     first_ack_range: VariableLengthInt,
     ack_ranges: std.ArrayList(AckRange),
     ecn_counts: ?EcnCounts = null,
@@ -92,11 +91,21 @@ pub const AckFrame = struct {
         self.ack_ranges.deinit();
     }
 
-    pub fn encode(self: *const Self, writer: anytype) !usize {
-        // TODO: implement
-        _ = self;
-        _ = writer;
-        return 0;
+    pub fn encode(self: *const Self, writer: anytype) !void {
+        const type_id =
+            if (self.ecn_counts) |_| try VariableLengthInt.fromInt(0x03) else try VariableLengthInt.fromInt(0x02);
+        try type_id.encode(writer);
+        try self.largest_ack.encode(writer);
+        try self.ack_delay.encode(writer);
+        const ack_range_count = try VariableLengthInt.fromInt(self.ack_ranges.items.len);
+        try ack_range_count.encode(writer);
+        try self.first_ack_range.encode(writer);
+
+        if (self.ecn_counts) |ecn_counts| {
+            try ecn_counts.ect0.encode(writer);
+            try ecn_counts.ect1.encode(writer);
+            try ecn_counts.ecn_cn.encode(writer);
+        }
     }
 
     pub fn decodeAfterType(
@@ -109,8 +118,7 @@ pub const AckFrame = struct {
         const range_count = try VariableLengthInt.decode(reader);
         const first_range = try VariableLengthInt.decode(reader);
         const ranges = ranges: {
-            var ranges = std.ArrayList(AckRange).init(allocator);
-            try ranges.ensureTotalCapacity(@intCast(usize, range_count.value));
+            var ranges = try std.ArrayList(AckRange).initCapacity(allocator, range_count.toInt(usize));
             var i: usize = 0;
             while (i < range_count.value) : (i += 1) {
                 const gap = try VariableLengthInt.decode(reader);
@@ -127,10 +135,8 @@ pub const AckFrame = struct {
         } else null;
 
         return Self{
-            .type_id = type_id,
             .largest_ack = largest,
             .ack_delay = delay,
-            .ack_range_count = range_count,
             .first_ack_range = first_range,
             .ack_ranges = ranges,
             .ecn_counts = ecn_counts,
