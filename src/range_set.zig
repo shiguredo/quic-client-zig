@@ -22,17 +22,20 @@ pub const Range = struct {
         };
     }
 
+    /// check n is in range of "self"
     pub fn contain(self: Self, n: u64) bool {
         return self.start <= n and n < self.end;
     }
 
+    /// check if self and another has common part or
+    /// self touches another
     pub fn isMergeable(self: Self, another: Self) bool {
         const check =
             self.contain(another.start) or
             (self.end == another.start) or
             self.contain(another.end) or
-            (self.start <= another.start and another.end <= self.end) or
-            (another.start <= self.start and self.end <= another.end);
+            self.isSubsetOf(another) or
+            another.isSubsetOf(self);
         return check;
     }
 
@@ -44,6 +47,11 @@ pub const Range = struct {
             math.min(self.start, another.start),
             math.max(self.end, another.end),
         );
+    }
+
+    /// check if "self" is a subset of "r"
+    pub fn isSubsetOf(self: Self, r: Self) bool {
+        return r.start <= self.start and self.end <= r.end;
     }
 };
 
@@ -110,7 +118,7 @@ pub const RangeSet = struct {
         self.ranges.deinit();
     }
 
-    pub fn push(self: *Self, range: Range) !void {
+    pub fn add(self: *Self, range: Range) mem.Allocator.Error!void {
         var new_range = range;
         var merge_count: usize = 0;
         var merge_start: ?usize = null;
@@ -122,12 +130,12 @@ pub const RangeSet = struct {
                 break;
             }
 
-            if (new_range.isMergeable(r)) {
-                new_range = new_range.merge(r) catch unreachable;
+            if (new_range.merge(r)) |nr| {
+                new_range = nr;
                 merge_count += 1;
                 if (merge_start == null) merge_start = i;
                 continue;
-            }
+            } else |_| {}
         }
 
         if (merge_start) |s| {
@@ -146,9 +154,9 @@ pub const RangeSet = struct {
         }
     }
 
-    pub fn pushOne(self: *Self, val: u64) !void {
+    pub fn pushOne(self: *Self, val: u64) mem.Allocator.Error!void {
         const r = Range.from(val, val + 1);
-        try self.push(r);
+        try self.add(r);
     }
 
     pub fn start(self: Self) ?u64 {
@@ -166,6 +174,14 @@ pub const RangeSet = struct {
             return null;
     }
 
+    pub fn include(self: Self, r: Range) bool {
+        for (self.ranges.items) |item| {
+            if (r.isSubsetOf(item))
+                return true;
+        }
+        return false;
+    }
+
     // struct-local functions
     /// remove N elements from idx
     fn removeN(self: *Self, idx: usize, n: usize) void {
@@ -178,7 +194,7 @@ pub const RangeSet = struct {
     }
 };
 
-test "RangeSet -- push" {
+test "RangeSet -- add" {
     const range_array = [_]Range{
         Range.from(100, 200),
         Range.from(180, 300),
@@ -190,7 +206,7 @@ test "RangeSet -- push" {
     defer range_set.deinit();
 
     for (range_array) |r| {
-        try range_set.push(r);
+        try range_set.add(r);
     }
 
     try testing.expectEqualSlices(
@@ -204,7 +220,7 @@ test "RangeSet -- push" {
     );
 
     var r = Range.from(30, 40);
-    try range_set.push(r);
+    try range_set.add(r);
     try testing.expectEqualSlices(
         Range,
         &[_]Range{
@@ -217,7 +233,7 @@ test "RangeSet -- push" {
     );
 
     r = Range.from(40, 50);
-    try range_set.push(r);
+    try range_set.add(r);
     try testing.expectEqualSlices(
         Range,
         &[_]Range{
@@ -229,7 +245,7 @@ test "RangeSet -- push" {
     );
 
     r = Range.from(40, 50);
-    try range_set.push(r);
+    try range_set.add(r);
     try testing.expectEqualSlices(
         Range,
         &[_]Range{
@@ -241,7 +257,7 @@ test "RangeSet -- push" {
     );
 
     r = Range.from(50, 110);
-    try range_set.push(r);
+    try range_set.add(r);
     try testing.expectEqualSlices(
         Range,
         &[_]Range{
@@ -252,7 +268,7 @@ test "RangeSet -- push" {
     );
 
     r = Range.from(20, 600);
-    try range_set.push(r);
+    try range_set.add(r);
     try testing.expectEqualSlices(
         Range,
         &[_]Range{
@@ -260,4 +276,36 @@ test "RangeSet -- push" {
         },
         range_set.ranges.items,
     );
+}
+
+test "RangeSet -- isSubsetOf" {
+    const range_array = [_]Range{
+        Range.from(100, 200),
+        Range.from(180, 300),
+        Range.from(50, 60),
+        Range.from(400, 500),
+    };
+
+    var range_set = RangeSet.init(testing.allocator);
+    defer range_set.deinit();
+
+    for (range_array) |r| {
+        try range_set.add(r);
+    }
+    // range_set should be
+    // [50, 60), [100, 300), [400, 500)
+    // from the previous test
+
+    try testing.expect(range_set.include(Range.from(200, 250)));
+    try testing.expect(range_set.include(Range.from(100, 250)));
+    try testing.expect(range_set.include(Range.from(200, 300)));
+    try testing.expect(range_set.include(Range.from(100, 300)));
+
+    try testing.expect(!range_set.include(Range.from(70, 80)));
+    try testing.expect(!range_set.include(Range.from(50, 80)));
+    try testing.expect(!range_set.include(Range.from(40, 55)));
+    try testing.expect(!range_set.include(Range.from(40, 70)));
+    try testing.expect(!range_set.include(Range.from(40, 700)));
+    try testing.expect(!range_set.include(Range.from(60, 70)));
+    try testing.expect(!range_set.include(Range.from(40, 50)));
 }
