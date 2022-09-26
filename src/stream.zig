@@ -177,6 +177,102 @@ test "RecvStream -- push and read" {
     try testing.expectEqualStrings("abcdef", read_buf[0..count]);
 }
 
+pub const SendStream = struct {
+    data: Queue,
+    offset: u64 = 0,
+    end_offset: u64 = 0,
+    allocator: mem.Allocator,
+
+    const Queue = std.fifo.LinearFifo(RangeBuf, .Dynamic);
+    const Self = @This();
+
+    pub fn init(allocator: mem.Allocator) Self {
+        return .{
+            .data = Queue.init(allocator),
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *Self) void {
+        var i: usize = 0;
+        while (i < self.data.count) : (i += 1) {
+            var buf = self.data.peekItem(i);
+            buf.deinit(self.allocator);
+        }
+        self.data.deinit();
+    }
+
+    pub fn emit(self: *Self, max_len: usize, allocator: mem.Allocator) !?RangeBuf {
+        if (self.data.count == 0)
+            return null;
+        var r_buf = self.data.peekItem(0);
+        const pos = @intCast(usize, self.offset - r_buf.offset);
+        const len =
+            math.min(max_len, r_buf.buf.len - pos);
+
+        const copy = try allocator.dupe(u8, r_buf.buf[pos .. pos + len]);
+        const offset = self.offset;
+        self.offset += len;
+
+        if (r_buf.endOffset() <= self.offset) {
+            r_buf.deinit(self.allocator);
+            self.data.discard(1);
+        }
+
+        return RangeBuf.fromSlice(copy, offset);
+    }
+
+    pub const WriteError = error{OutOfMemory};
+    pub const Writer = io.Writer(*Self, WriteError, write);
+
+    pub fn write(self: *Self, buf: []const u8) WriteError!usize {
+        const copy = try self.allocator.dupe(u8, buf);
+        const range_buf = RangeBuf.fromSlice(copy, self.end_offset);
+        self.end_offset += buf.len;
+
+        try self.data.writeItem(range_buf);
+        return buf.len;
+    }
+
+    pub fn writer(self: *Self) Writer {
+        return .{ .context = self };
+    }
+};
+
+test "SendStream -- write and emit" {
+    const allocator = testing.allocator;
+    var ss = SendStream.init(allocator);
+    defer ss.deinit();
+
+    _ = try ss.writer().write("hello, world.");
+    _ = try ss.writer().write("abcdef");
+    _ = try ss.writer().write("0123456789");
+
+    var buf1 = (try ss.emit(5, allocator)).?;
+    defer buf1.deinit(allocator);
+    try testing.expectEqualStrings("hello", buf1.buf);
+
+    var buf2 = (try ss.emit(500, allocator)).?;
+    defer buf2.deinit(allocator);
+    try testing.expectEqualStrings(", world.", buf2.buf);
+
+    var buf3 = (try ss.emit(500, allocator)).?;
+    defer buf3.deinit(allocator);
+    try testing.expectEqualStrings("abcdef", buf3.buf);
+
+    var buf4 = (try ss.emit(5, allocator)).?;
+    defer buf4.deinit(allocator);
+    try testing.expectEqualStrings("01234", buf4.buf);
+
+    var buf5 = (try ss.emit(2, allocator)).?;
+    defer buf5.deinit(allocator);
+    try testing.expectEqualStrings("56", buf5.buf);
+
+    var buf6 = (try ss.emit(3, allocator)).?;
+    defer buf6.deinit(allocator);
+    try testing.expectEqualStrings("789", buf6.buf);
+}
+
 pub const RangeBuf = struct {
     buf: []const u8,
     offset: u64,
@@ -202,6 +298,10 @@ pub const RangeBuf = struct {
             off,
             off + self.buf.len,
         );
+    }
+
+    pub fn endOffset(self: Self) u64 {
+        return self.offset + @intCast(u64, self.buf.len);
     }
 
     pub fn getSliceWithOffset(self: Self, offset: u64) ?[]const u8 {
