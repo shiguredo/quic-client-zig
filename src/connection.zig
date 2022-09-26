@@ -9,21 +9,30 @@ const tls = @import("tls.zig");
 const packet = @import("packet.zig");
 const frame = @import("frame.zig");
 const util = @import("util.zig");
+const stream = @import("stream.zig");
 const Buffer = @import("buffer.zig").Buffer;
+const RangeSet = @import("range_set.zig").RangeSet;
 
 pub const QuicConfig = struct {};
 
 pub const QuicSocket = struct {
     tls_provider: tls.Provider,
     dg_socket: udp.DatagramSocket,
+    c_streams: stream.CryptoStreams,
+    ack_ranges: RangeSet,
+    allocator: mem.Allocator,
 
     const Self = @This();
 
-    pub fn init(address: net.Address) !Self {
+    pub fn init(address: net.Address, allocator: mem.Allocator) !Self {
         var dg_socket = try udp.udpConnectToAddress(address);
+
         return .{
             .tls_provider = tls.Provider{},
             .dg_socket = dg_socket,
+            .c_streams = stream.CryptoStreams.init(allocator),
+            .ack_ranges = RangeSet.init(allocator),
+            .allocator = allocator,
         };
     }
 
@@ -32,6 +41,7 @@ pub const QuicSocket = struct {
         self.dg_socket.close();
     }
 
+    /// Start handshake
     pub fn connnect(self: *Self, allocator: mem.Allocator) !void {
         const scid = scid: {
             var id = try packet.ConnectionId.init(8);
@@ -77,63 +87,52 @@ pub const QuicSocket = struct {
         };
         defer c_initial.deinit();
 
-        var w_buf = Buffer(65536).init();
+        var w_buf = Buffer(4096).init();
         try c_initial.encodeEncrypted(w_buf.writer(), allocator, self.tls_provider);
         _ = try self.dg_socket.write(w_buf.getUnreadSlice());
 
-        var r_buf = [_]u8{0} ** 65536;
-        var count: usize = 0;
-        while (count == 0) : (count += try self.dg_socket.reader().read(r_buf[count..])) {}
-        var stream = std.io.fixedBufferStream(r_buf[0..count]);
+    }
 
-        var s_initial = try packet.LongHeaderPacket.decodeEncrypted(
-            stream.reader(),
-            allocator,
+    /// recieve data from udp socket and handle it.
+    pub fn recv(self: *Self, buf: []const u8) !void {
+        var s = std.io.fixedBufferStream(buf);
+
+        while (packet.LongHeaderPacket.decodeEncrypted(
+            s.reader(),
+            self.allocator,
             self.tls_provider,
-        );
-        defer s_initial.deinit();
+        )) |pkt| {
+            self.handlePacket(pkt);
+        } else |err| {
+            if (err != error.EndOfStream) return err;
+        }
+    }
 
-        for (s_initial.payload.items) |f| {
-            switch (f) {
-                .crypto => |c| try self.tls_provider.handleServerHello(c.data.items, allocator),
-                else => {},
+    /// transmit data if needed (TODO: implementation)
+    pub fn transmit(self: *Self) !void {
+        _ = self;
+    }
+
+    pub fn handlePacket(self: *Self, pkt: packet.LongHeaderPacket) !void {
+        for (pkt.payload) |frm| {
+            switch (frm) {
+                .padding => {},
+                .ack => {},
+                .crypto => |f| self.handleCryptoFrame(f),
+                .stream => {},
+                .handshake_done => {},
             }
         }
+        try self.ack_ranges.addOne(@intCast(u64, pkt.packet_number));
+    }
 
-        self.tls_provider.setUpEarly(null);
-        try self.tls_provider.createSharedKey();
-        try self.tls_provider.setUpHandshake(allocator);
+    pub fn handleCryptoFrame(self: *Self, c_frame: frame.CryptoFrame, epoch: tls.Epoch) !void {
+        var s = self.c_streams.getPtr(epoch);
+        const data = c_frame.data.items;
+        const offset = c_frame.offset;
+        const end_offset = offset + data.len;
 
-        var s_handshake = try packet.LongHeaderPacket.decodeEncrypted(
-            stream.reader(),
-            allocator,
-            self.tls_provider,
-        );
-        defer s_handshake.deinit();
-
-        var c_initial_2 = packet.LongHeaderPacket{
-            .flags = packet.LongHeaderFlags.initial(1),
-            .dst_cid = dcid,
-            .src_cid = scid,
-            .token = std.ArrayList(u8).init(allocator),
-            .packet_number = 0x01,
-            .payload = p: {
-                var frames = std.ArrayList(frame.Frame).init(allocator);
-                const ack_frame = frame.AckFrame{
-                    .largest_ack = try util.VariableLengthInt.fromInt(0),
-                    .ack_delay = try util.VariableLengthInt.fromInt(400),
-                    .first_ack_range = try util.VariableLengthInt.fromInt(0),
-                    .ack_ranges = std.ArrayList(frame.AckFrame.AckRange).init(allocator),
-                };
-                try frames.append(.{ .ack = ack_frame });
-                break :p frames;
-            },
-        };
-        defer c_initial_2.deinit();
-
-        w_buf.clear();
-        try c_initial_2.encodeEncrypted(w_buf.writer(), allocator, self.tls_provider);
-        _ = try self.dg_socket.write(w_buf.getUnreadSlice());
+        mem.copy(u8, s.*.items[offset..end_offset], data);
     }
 };
 
@@ -141,7 +140,10 @@ test "connect()" {
     // To run this test, set QUIC_CONNECTION_TEST_ENABLED=1
     if (std.os.getenv("QUIC_CONNECTION_TEST_ENABLED")) |_| {} else return error.SkipZigTest;
 
-    var sock = try QuicSocket.init(net.Address.initIp4(.{ 127, 0, 0, 1 }, 4433));
+    var sock = try QuicSocket.init(
+        net.Address.initIp4(.{ 127, 0, 0, 1 }, 4433),
+        testing.allocator,
+    );
     defer sock.close();
     try sock.connnect(testing.allocator);
 }
