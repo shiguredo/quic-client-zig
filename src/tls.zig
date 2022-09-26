@@ -11,6 +11,13 @@ pub const ServerHello = @import("tls/client_server_hello.zig").ServerHello;
 
 pub const extension = @import("tls/extension.zig");
 
+pub const Epoch = enum {
+    initial,
+    zero_rtt,
+    handshake,
+    one_rtt,
+};
+
 const std = @import("std");
 
 test {
