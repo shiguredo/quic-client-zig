@@ -16,9 +16,7 @@ pub const CryptoStreams = struct {
     const Self = @This();
 
     pub fn init(allocator: mem.Allocator) Self {
-        var instance = Self{
-            .streams = StreamsArray.initUndefined()
-        };
+        var instance = Self{ .streams = StreamsArray.initUndefined() };
         var iter = instance.streams.iterator();
         while (iter.next()) |*s| {
             var ptr = instance.getPtr(s.key);

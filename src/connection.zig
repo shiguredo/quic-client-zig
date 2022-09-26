@@ -90,7 +90,6 @@ pub const QuicSocket = struct {
         var w_buf = Buffer(4096).init();
         try c_initial.encodeEncrypted(w_buf.writer(), allocator, self.tls_provider);
         _ = try self.dg_socket.write(w_buf.getUnreadSlice());
-
     }
 
     /// recieve data from udp socket and handle it.
