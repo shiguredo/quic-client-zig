@@ -154,7 +154,7 @@ pub const RangeSet = struct {
         }
     }
 
-    pub fn pushOne(self: *Self, val: u64) mem.Allocator.Error!void {
+    pub fn addOne(self: *Self, val: u64) mem.Allocator.Error!void {
         const r = Range.from(val, val + 1);
         try self.add(r);
     }
