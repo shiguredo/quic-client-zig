@@ -9,9 +9,62 @@ const tls = @import("tls.zig");
 const Range = @import("range_set.zig").Range;
 const RangeSet = @import("range_set.zig").RangeSet;
 
-pub const CryptoStreams = enums.EnumArray(tls.Epoch, std.ArrayList(u8));
+pub const CryptoStreams = struct {
+    streams: StreamsArray,
 
-pub const Stream = struct {};
+    const StreamsArray = enums.EnumArray(tls.Epoch, Stream);
+    const Self = @This();
+
+    pub fn init(allocator: mem.Allocator) Self {
+        var instance = Self{
+            .streams = StreamsArray.initUndefined()
+        };
+        var iter = instance.streams.iterator();
+        while (iter.next()) |*s| {
+            var ptr = instance.getPtr(s.key);
+            ptr.* = Stream.init(allocator);
+        }
+        return instance;
+    }
+
+    pub fn deinit(self: *Self) void {
+        var iter = self.streams.iterator();
+        while (iter.next()) |*s| {
+            s.value.deinit();
+        }
+    }
+
+    pub fn getPtr(self: *Self, key: tls.Epoch) *Stream {
+        return self.streams.getPtr(key);
+    }
+};
+
+test "CryptoStreams" {
+    var cs = CryptoStreams.init(testing.allocator);
+    defer cs.deinit();
+
+    var ptr = cs.getPtr(.initial);
+    _ = try ptr.sender.write("Hello, World!");
+}
+
+pub const Stream = struct {
+    reciever: RecvStream,
+    sender: SendStream,
+
+    const Self = @This();
+
+    pub fn init(allocator: mem.Allocator) Self {
+        return .{
+            .reciever = RecvStream.init(allocator),
+            .sender = SendStream.init(allocator),
+        };
+    }
+
+    pub fn deinit(self: *Self) void {
+        self.reciever.deinit();
+        self.sender.deinit();
+    }
+};
 
 pub const RecvStream = struct {
     data: Queue,
