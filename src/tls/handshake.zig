@@ -23,6 +23,8 @@ pub const HandshakeType = enum(u8) {
     }
 };
 
+/// decoded Handshake
+/// https://www.rfc-editor.org/rfc/rfc8446#section-4
 pub const Handshake = union(HandshakeType) {
     client_hello: ClientHello,
     server_hello: ServerHello,
@@ -97,6 +99,45 @@ pub const Handshake = union(HandshakeType) {
             },
             else => unreachable, // TODO: implement for other handshake types
         };
+    }
+};
+
+/// raw byte data of struct Handshake
+/// https://www.rfc-editor.org/rfc/rfc8446#section-4
+pub const HandshakeRaw = struct {
+    data: std.ArrayList(u8),
+    max_len: usize,
+
+    const Self = @This();
+
+    pub fn init(allocator: mem.Allocator, max_len: usize) !Self {
+        return .{
+            .data = std.ArrayList(u8).initCapacity(
+                allocator,
+                max_len,
+            ),
+            .max_len = max_len,
+        };
+    }
+
+    pub fn fromArrayList(data: std.ArrayList(u8)) Self {
+        return .{
+            .data = data,
+            .max_len = data.items.len,
+        };
+    }
+
+    pub fn deinit(self: Self) void {
+        self.data.deinit();
+    }
+
+    pub fn isComplete(self: Self) bool {
+        return self.max_len == self.data.items.len;
+    }
+
+    pub fn write(self: *Self, buf: []const u8) !usize {
+        const len = self.max_len - self.data.items.len;
+        self.data.appendSlice(buf[0..len]);
     }
 };
 

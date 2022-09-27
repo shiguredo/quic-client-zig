@@ -16,11 +16,22 @@ const HeaderForm = enum(u1) {
     long = 0b1,
 };
 
-const LongHeaderPacketTypes = enum(u2) {
+pub const LongHeaderPacketTypes = enum(u2) {
     initial = 0x00,
     zero_rtt = 0x01,
     handshake = 0x02,
     retry = 0x03,
+
+    const Self = @This();
+
+    pub fn toEpoch(self: Self) !tls.Epoch {
+        return switch (self) {
+            .initial => .initial,
+            .zero_rtt => .zero_rtt,
+            .handshake => .handshake,
+            else => return error.ValueError,
+        };
+    }
 };
 
 pub const LongHeaderFlags = packed struct {
@@ -330,7 +341,7 @@ test "decode initial packet" {
     );
     // zig fmt: on
     var stream = std.io.fixedBufferStream(&server_initial);
-    var tls_provider = tls.Provider{};
+    var tls_provider = tls.Provider.init(testing.allocator);
     tls_provider.setUpInitial("\x76\x49\x73\x32\xb6\x4c\x00\x9c");
     const initial_packet = try LongHeaderPacket.decodeEncrypted(stream.reader(), testing.allocator, tls_provider);
     defer initial_packet.deinit();

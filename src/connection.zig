@@ -28,7 +28,7 @@ pub const QuicSocket = struct {
         var dg_socket = try udp.udpConnectToAddress(address);
 
         return .{
-            .tls_provider = tls.Provider{},
+            .tls_provider = tls.Provider.init(allocator),
             .dg_socket = dg_socket,
             .c_streams = stream.CryptoStreams.init(allocator),
             .ack_ranges = RangeSet.init(allocator),
@@ -60,7 +60,7 @@ pub const QuicSocket = struct {
         self.tls_provider.x25519_keypair = try crypto.dh.X25519.KeyPair.create(null);
 
         var c_hello_frame = ch: {
-            var c_hello = try self.tls_provider.createClientHello(allocator, scid);
+            var c_hello = try self.tls_provider.createClientHello(scid);
             defer c_hello.deinit();
             var ch_frame = frame.CryptoFrame{
                 .offset = try util.VariableLengthInt.fromInt(0),
@@ -123,15 +123,16 @@ pub const QuicSocket = struct {
             }
         }
         try self.ack_ranges.addOne(@intCast(u64, pkt.packet_number));
+        try self.transmit();
     }
 
     pub fn handleCryptoFrame(self: *Self, c_frame: frame.CryptoFrame, epoch: tls.Epoch) !void {
-        var s = self.c_streams.getPtr(epoch);
-        const data = c_frame.data.items;
-        const offset = c_frame.offset;
-        const end_offset = offset + data.len;
-
-        mem.copy(u8, s.*.items[offset..end_offset], data);
+        var cs = self.c_streams.getPtr(epoch);
+        try cs.reciever.push(
+            c_frame.data.items,
+            @intCast(usize, c_frame.offset.value),
+        );
+        try self.tls_provider.handleStream(cs, epoch);
     }
 };
 

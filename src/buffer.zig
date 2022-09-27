@@ -88,6 +88,27 @@ pub fn Buffer(comptime capacity: comptime_int) type {
             return unwritten_count;
         }
 
+        /// discard n datas without reading
+        pub fn discard(self: *Self, n: usize) void {
+            self.read_pos += n;
+            if (self.read_pos > self.array.len)
+                self.read_pos = self.array.len;
+        }
+
+        /// read data from reader and write to self
+        pub fn readFrom(self: *Self, other_reader: anytype) void {
+            var slice = self.getUnwrittenSlice();
+            const n = try other_reader.read(slice);
+            self.write_pos += n;
+        }
+
+        pub fn realign(self: *Self) void {
+            const len = self.unreadLength();
+            mem.copy(u8, &self.array, self.getUnreadSlice());
+            self.read_pos = 0;
+            self.write_pos = len;
+        }
+
         pub fn clear(self: *Self) void {
             self.read_pos = 0;
             self.write_pos = 0;

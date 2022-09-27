@@ -215,7 +215,7 @@ test "encryptInitialPacket" {
 
     const payload_len_with_padding = 1162;
     const payload = payload_array[0..payload_len_with_padding];
-    var tls_provider = tls.Provider{};
+    var tls_provider = tls.Provider.init(testing.allocator);
     tls_provider.setUpInitial(
         &[_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 },
     );
@@ -359,7 +359,7 @@ test "decryptInitialPacket" {
     );
     // zig fmt: on
 
-    var tls_provider = tls.Provider{};
+    var tls_provider = tls.Provider.init(testing.allocator);
     tls_provider.setUpInitial(
         &[_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 },
     );

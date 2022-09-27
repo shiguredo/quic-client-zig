@@ -6,15 +6,33 @@ const fmt = std.fmt;
 
 const q_crypto = @import("../crypto.zig");
 const tls = @import("../tls.zig");
+const HandshakeRaw = @import("handshake.zig").HandshakeRaw;
 const extension = tls.extension;
 const packet = @import("../packet.zig");
+const Stream = @import("../stream.zig").Stream;
+const Buffer = @import("../buffer.zig").Buffer;
 
 const Sha256 = q_crypto.Sha256;
 const Hmac = q_crypto.Hmac;
 const Hkdf = q_crypto.Hkdf;
 const X25519 = crypto.dh.X25519;
 
+///  TLS client's state machine
+///  https://www.rfc-editor.org/rfc/rfc8446#appendix-A.1
+pub const State = enum {
+    start,
+    wait_sh,
+    wait_ee,
+    wait_cert_cr,
+    wait_cert,
+    wait_cv,
+    wait_finished,
+    connected,
+};
+
 pub const Provider = struct {
+    state: State = .start,
+
     initial_secret: [Hmac.key_length]u8 = undefined,
     client_initial: ?QuicKeys = null,
     server_initial: ?QuicKeys = null,
@@ -29,12 +47,18 @@ pub const Provider = struct {
 
     shared_key: ?[X25519.shared_length]u8 = null,
 
-    client_hello_bytes: ?std.ArrayList(u8) = null,
-    server_hello_bytes: ?std.ArrayList(u8) = null,
+    /// client hello raw data
+    raw_ch: ?HandshakeRaw = null,
+    /// server hello raw data
+    raw_sh: ?HandshakeRaw = null,
+
+    allocator: mem.Allocator,
 
     const Self = @This();
 
     pub const Error = error{ KeyNotInstalled, MessageNotInstalled };
+    const HandshakeHandlingError =
+        error{ MessageIncomplete, HandshakeTypeError };
 
     pub const QuicKeys = struct {
         secret: [Hmac.key_length]u8 = undefined,
@@ -47,9 +71,15 @@ pub const Provider = struct {
         const HP_KEY_LENGTH = 16;
     };
 
+    pub fn init(allocator: mem.Allocator) Self {
+        return .{
+            .allocator = allocator,
+        };
+    }
+
     pub fn deinit(self: *Self) void {
-        if (self.client_hello_bytes) |h| h.deinit();
-        if (self.server_hello_bytes) |h| h.deinit();
+        if (self.raw_ch) |h| h.deinit();
+        if (self.raw_sh) |h| h.deinit();
     }
 
     /// derives initial secret from client's destination connection ID
@@ -76,6 +106,7 @@ pub const Provider = struct {
         self.server_initial = server_initial;
     }
 
+    /// setup early key
     pub fn setUpEarly(self: *Self, psk: ?[]const u8) void {
         const ikm = psk orelse &[_]u8{0} ** Hmac.key_length;
         self.early_secret = Hkdf.extract(&[_]u8{0}, ikm);
@@ -87,7 +118,9 @@ pub const Provider = struct {
         } else return Error.KeyNotInstalled;
     }
 
-    pub fn setUpHandshake(self: *Self, allocator: mem.Allocator) !void {
+    /// setup handshake key
+    pub fn setUpHandshake(self: *Self) !void {
+        const allocator = self.allocator;
         const early_secret = self.early_secret orelse return Error.KeyNotInstalled;
         var early_derived: [Sha256.digest_length]u8 = undefined;
         q_crypto.deriveSecret(&early_derived, early_secret, "derived", "");
@@ -96,11 +129,11 @@ pub const Provider = struct {
         const hs_secret = Hkdf.extract(&early_derived, &ecdhe_input);
         self.handshake_secret = hs_secret;
 
-        if (self.client_hello_bytes) |_| {} else return Error.MessageNotInstalled;
-        if (self.server_hello_bytes) |_| {} else return Error.MessageNotInstalled;
+        if (self.raw_ch == null) return Error.MessageNotInstalled;
+        if (self.raw_sh == null) return Error.MessageNotInstalled;
         const message = try mem.concat(allocator, u8, &[_][]const u8{
-            self.client_hello_bytes.?.items,
-            self.server_hello_bytes.?.items,
+            self.raw_ch.?.data.items,
+            self.raw_sh.?.data.items,
         });
         defer allocator.free(message);
 
@@ -138,11 +171,12 @@ pub const Provider = struct {
         };
     }
 
+    /// returns ClientHello contained in Handshake union
     pub fn createClientHello(
         self: *Self,
-        allocator: mem.Allocator,
         quic_scid: packet.ConnectionId,
     ) !tls.Handshake {
+        const allocator = self.allocator;
         var c_hello = try tls.ClientHello.init(allocator);
         try c_hello.appendCipher(.{ 0x13, 0x01 }); // TLS_AES_128_GCM_SHA256
 
@@ -186,24 +220,74 @@ pub const Provider = struct {
 
         var hs = tls.Handshake{ .client_hello = c_hello };
 
-        self.client_hello_bytes = blk: {
+        self.raw_ch = blk: {
             var temp = std.ArrayList(u8).init(allocator);
             try hs.encode(temp.writer());
-            break :blk temp;
+            break :blk HandshakeRaw.fromArrayList(temp);
         };
 
         return hs;
     }
 
-    pub fn handleServerHello(self: *Self, s_hello_bytes: []const u8, allocator: mem.Allocator) !void {
-        self.server_hello_bytes = blk: {
-            var temp = std.ArrayList(u8).init(allocator);
-            try temp.appendSlice(s_hello_bytes);
-            break :blk temp;
-        };
+    /// Handle crypto stream of quic
+    pub fn handleStream(
+        self: *Self,
+        stream: Stream,
+        epoch: tls.Epoch,
+    ) void {
+        var buf = Buffer(2048);
+        var reader = stream.reciever.reader();
+        read_loop: while (true) {
+            try buf.readFrom(reader);
+            if (buf.unreadLength() == 0) break;
+            switch (self.state) {
+                .wait_sh => {
+                    if (epoch != .initial)
+                        return error.StateError;
+                    if (self.raw_sh) |*raw_sh| {
+                        const n = try raw_sh.write(buf.getUnreadSlice());
+                        buf.discard(n);
+                        if (buf.unreadLength() == 0)
+                            buf.clear()
+                        else
+                            buf.realign();
+                    } else {
+                        self.raw_sh = sh: {
+                            if (buf.unreadLength() < 4) {
+                                buf.realign();
+                                continue :read_loop;
+                            }
+                            const slice =
+                                buf.getUnreadSlice();
+                            const max_len =
+                                mem.readIntBig(u24, slice[1..4]) + 4;
+                            var sh = HandshakeRaw.init(
+                                self.allocator,
+                                @intCast(usize, max_len),
+                            );
+                            break :sh sh;
+                        };
+                    }
+                    self.handleServerHello();
+                },
+                else => unreachable,
+            }
+        }
+    }
 
-        var stream = std.io.fixedBufferStream(s_hello_bytes);
-        const s_hello = try tls.Handshake.decode(stream.reader(), allocator);
+    /// Reads bytes from self.raw_sh and handle it
+    /// when self.raw_sh is not completed (its length is shorter
+    /// than the length field indicates), does nothing
+    pub fn handleServerHello(
+        self: *Self,
+    ) mem.Allocator.Error!void {
+        const raw_bytes =
+            self.raw_sh orelse return;
+        if (!raw_bytes.isComplete())
+            return;
+
+        var stream = std.io.fixedBufferStream(raw_bytes.data.items);
+        const s_hello = try tls.Handshake.decode(stream.reader(), self.allocator);
         defer s_hello.deinit();
 
         for (s_hello.server_hello.extensions.items) |ext| {
@@ -212,12 +296,21 @@ pub const Provider = struct {
                 mem.copy(u8, &self.x25519_peer.?, ext.key_share.server_share.?.key_exchange.items);
             }
         }
+
+        // The next state is wait encrypted extensions
+        self.state = .wait_ee;
+    }
+
+    pub fn handleEncryptedExtensions(
+        self: *Self,
+    ) void {
+        _ = self;
     }
 };
 
 test "setUpInitial" {
     // test vectors from https://www.rfc-editor.org/rfc/rfc9001#name-sample-packet-protection
-    var tls_provider = Provider{};
+    var tls_provider = tls.Provider.init(testing.allocator);
     tls_provider.setUpInitial(
         &[_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 },
     );
@@ -293,7 +386,7 @@ test "setUpInitial" {
 test "Key schedule" {
     const allocator = testing.allocator;
 
-    var provider = Provider{};
+    var provider = tls.Provider.init(testing.allocator);
     provider.setUpEarly(null);
     try testing.expectFmt("33ad0a1c607ec03b09e6cd9893680ce210adf300aa1f2660e1b22e10f170f92a", "{x}", .{fmt.fmtSliceHexLower(&provider.early_secret.?)});
 
@@ -354,15 +447,21 @@ test "Key schedule" {
         "\xdb\xf7\xc6\x72\xe1\x56\xd6\xcc\x25\x3b\x83\x3d\xf1\xdd\x69\xb1\xb0\x4e\x75\x1f\x0f" ++
         "\x00\x2b\x00\x02\x03\x04";
 
-    provider.client_hello_bytes = std.ArrayList(u8).init(allocator);
-    defer provider.client_hello_bytes.?.deinit();
-    try provider.client_hello_bytes.?.appendSlice(client_hello_bytes);
+    provider.raw_ch = ch: {
+        var temp = std.ArrayList(u8).init(allocator);
+        try temp.appendSlice(client_hello_bytes);
+        break :ch HandshakeRaw.fromArrayList(temp);
+    };
+    defer provider.raw_ch.?.deinit();
 
-    provider.server_hello_bytes = std.ArrayList(u8).init(allocator);
-    defer provider.server_hello_bytes.?.deinit();
-    try provider.server_hello_bytes.?.appendSlice(server_hello_bytes);
+    provider.raw_sh = sh: {
+        var temp = std.ArrayList(u8).init(allocator);
+        try temp.appendSlice(server_hello_bytes);
+        break :sh HandshakeRaw.fromArrayList(temp);
+    };
+    defer provider.raw_sh.?.deinit();
 
-    try provider.setUpHandshake(allocator);
+    try provider.setUpHandshake();
     try testing.expectFmt(
         "1dc826e93606aa6fdc0aadc12f741b01046aa6b99f691ed221a9f0ca043fbeac",
         "{x}",

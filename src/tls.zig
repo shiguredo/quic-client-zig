@@ -1,3 +1,5 @@
+const std = @import("std");
+
 pub const Provider = @import("tls/provider.zig").Provider;
 
 pub const TlsMessageType = @import("tls/tls_message.zig").TlsMessageType;
@@ -17,8 +19,6 @@ pub const Epoch = enum {
     handshake,
     one_rtt,
 };
-
-const std = @import("std");
 
 test {
     std.testing.refAllDecls(@This());
