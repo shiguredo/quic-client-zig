@@ -72,6 +72,8 @@ pub const Provider = struct {
         const HP_KEY_LENGTH = 16;
     };
 
+    const BUF_SIZE = 2048;
+
     pub fn init(allocator: mem.Allocator) Self {
         return .{
             .allocator = allocator,
@@ -237,7 +239,7 @@ pub const Provider = struct {
         stream: *Stream,
         epoch: tls.Epoch,
     ) !void {
-        var buf = Buffer(2048).init();
+        var buf = Buffer(BUF_SIZE).init();
         var reader = stream.reciever.reader();
         read_loop: while (true) {
             try buf.readFrom(reader);
@@ -247,31 +249,18 @@ pub const Provider = struct {
                     if (epoch != .initial)
                         return error.StateError;
                     if (self.raw_sh) |*raw_sh| {
-                        const n = try raw_sh.write(buf.getUnreadSlice());
-                        buf.discard(n);
-                        if (buf.unreadLength() == 0)
-                            buf.clear()
-                        else
-                            buf.realign();
+                        try handleRaw(raw_sh, &buf);
                     } else {
-                        self.raw_sh = sh: {
-                            if (buf.unreadLength() < 4) {
+                        self.raw_sh = createRaw(&buf, self.allocator) catch |err| {
+                            if (err == error.DataTooShort) {
                                 buf.realign();
                                 continue :read_loop;
-                            }
-                            const slice =
-                                buf.getUnreadSlice();
-                            const max_len =
-                                mem.readIntBig(u24, slice[1..4]) + 4;
-                            var sh = try HandshakeRaw.init(
-                                self.allocator,
-                                @intCast(usize, max_len),
-                            );
-                            break :sh sh;
+                            } else return err;
                         };
                     }
                     try self.handleServerHello();
                 },
+                .wait_ee => {},
                 else => unreachable,
             }
         }
@@ -307,6 +296,32 @@ pub const Provider = struct {
         self: *Self,
     ) void {
         _ = self;
+    }
+
+    fn handleRaw(raw: *HandshakeRaw, buf_ptr: *Buffer(BUF_SIZE)) !void {
+        const n = try raw.write(buf_ptr.getUnreadSlice());
+        buf_ptr.discard(n);
+        if (buf_ptr.unreadLength() == 0)
+            buf_ptr.clear()
+        else
+            buf_ptr.realign();
+    }
+
+    fn createRaw(buf_ptr: *Buffer(BUF_SIZE), allocator: mem.Allocator) !HandshakeRaw {
+        return blk: {
+            if (buf_ptr.unreadLength() < 4) {
+                return error.DataTooShort;
+            }
+            const slice =
+                buf_ptr.getUnreadSlice();
+            const max_len =
+                mem.readIntBig(u24, slice[1..4]) + 4;
+            var raw = try HandshakeRaw.init(
+                allocator,
+                @intCast(usize, max_len),
+            );
+            break :blk raw;
+        };
     }
 };
 
