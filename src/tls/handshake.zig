@@ -1,6 +1,7 @@
 const std = @import("std");
 const mem = std.mem;
 const io = std.io;
+const math = std.math;
 const testing = std.testing;
 const enums = std.enums;
 
@@ -136,7 +137,8 @@ pub const HandshakeRaw = struct {
     }
 
     pub fn write(self: *Self, buf: []const u8) !usize {
-        const len = self.max_len - self.data.items.len;
+        const len = 
+            math.min(self.max_len - self.data.items.len, buf.len);
         try self.data.appendSlice(buf[0..len]);
         return len;
     }
