@@ -42,7 +42,7 @@ pub const QuicSocket = struct {
     }
 
     /// Start handshake
-    pub fn connnect(self: *Self, allocator: mem.Allocator) !void {
+    pub fn connnect(self: *Self) !void {
         const scid = scid: {
             var id = try packet.ConnectionId.init(8);
             crypto.random.bytes(id.slice());
@@ -65,7 +65,7 @@ pub const QuicSocket = struct {
             var ch_frame = frame.CryptoFrame{
                 .offset = try util.VariableLengthInt.fromInt(0),
                 .data = data: {
-                    var data = std.ArrayList(u8).init(allocator);
+                    var data = std.ArrayList(u8).init(self.allocator);
                     try c_hello.encode(data.writer());
                     break :data data;
                 },
@@ -77,10 +77,10 @@ pub const QuicSocket = struct {
             .flags = packet.LongHeaderFlags.initial(1),
             .dst_cid = dcid,
             .src_cid = scid,
-            .token = std.ArrayList(u8).init(allocator),
+            .token = std.ArrayList(u8).init(self.allocator),
             .packet_number = 0x00,
             .payload = p: {
-                var frames = std.ArrayList(frame.Frame).init(allocator);
+                var frames = std.ArrayList(frame.Frame).init(self.allocator);
                 try frames.append(.{ .crypto = c_hello_frame });
                 break :p frames;
             },
@@ -88,7 +88,11 @@ pub const QuicSocket = struct {
         defer c_initial.deinit();
 
         var w_buf = Buffer(4096).init();
-        try c_initial.encodeEncrypted(w_buf.writer(), allocator, self.tls_provider);
+        try c_initial.encodeEncrypted(
+            w_buf.writer(),
+            self.allocator,
+            self.tls_provider,
+        );
         _ = try self.dg_socket.write(w_buf.getUnreadSlice());
     }
 
@@ -145,5 +149,5 @@ test "connect()" {
         testing.allocator,
     );
     defer sock.close();
-    try sock.connnect(testing.allocator);
+    try sock.connnect();
 }
