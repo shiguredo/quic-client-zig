@@ -96,7 +96,7 @@ pub fn Buffer(comptime capacity: comptime_int) type {
         }
 
         /// read data from reader and write to self
-        pub fn readFrom(self: *Self, other_reader: anytype) void {
+        pub fn readFrom(self: *Self, other_reader: anytype) !void {
             var slice = self.getUnwrittenSlice();
             const n = try other_reader.read(slice);
             self.write_pos += n;

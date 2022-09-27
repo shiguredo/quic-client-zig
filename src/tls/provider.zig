@@ -10,6 +10,7 @@ const HandshakeRaw = @import("handshake.zig").HandshakeRaw;
 const extension = tls.extension;
 const packet = @import("../packet.zig");
 const Stream = @import("../stream.zig").Stream;
+const CryptoStreams = @import("../stream.zig").CryptoStreams;
 const Buffer = @import("../buffer.zig").Buffer;
 
 const Sha256 = q_crypto.Sha256;
@@ -226,16 +227,17 @@ pub const Provider = struct {
             break :blk HandshakeRaw.fromArrayList(temp);
         };
 
+        defer self.state = .wait_sh;
         return hs;
     }
 
     /// Handle crypto stream of quic
     pub fn handleStream(
         self: *Self,
-        stream: Stream,
+        stream: *Stream,
         epoch: tls.Epoch,
-    ) void {
-        var buf = Buffer(2048);
+    ) !void {
+        var buf = Buffer(2048).init();
         var reader = stream.reciever.reader();
         read_loop: while (true) {
             try buf.readFrom(reader);
@@ -261,14 +263,14 @@ pub const Provider = struct {
                                 buf.getUnreadSlice();
                             const max_len =
                                 mem.readIntBig(u24, slice[1..4]) + 4;
-                            var sh = HandshakeRaw.init(
+                            var sh = try HandshakeRaw.init(
                                 self.allocator,
                                 @intCast(usize, max_len),
                             );
                             break :sh sh;
                         };
                     }
-                    self.handleServerHello();
+                    try self.handleServerHello();
                 },
                 else => unreachable,
             }
@@ -280,7 +282,7 @@ pub const Provider = struct {
     /// than the length field indicates), does nothing
     pub fn handleServerHello(
         self: *Self,
-    ) mem.Allocator.Error!void {
+    ) !void {
         const raw_bytes =
             self.raw_sh orelse return;
         if (!raw_bytes.isComplete())
@@ -477,4 +479,28 @@ test "Key schedule" {
         "{x}",
         .{std.fmt.fmtSliceHexLower(&provider.server_handshake.?.secret)},
     );
+}
+
+test "handleStream" {
+    const allocator = testing.allocator;
+    var provider = Provider.init(allocator);
+    defer provider.deinit();
+    provider.x25519_keypair = try crypto.dh.X25519.KeyPair.create(null);
+    var streams = CryptoStreams.init(allocator);
+    defer streams.deinit();
+
+    const raw_sh =
+        "\x02\x00\x00\x56\x03\x03\xa6\xaf\x06\xa4\x12\x18\x60\xdc\x5e\x6e\x60\x24\x9c\xd3\x4c" ++
+        "\x95\x93\x0c\x8a\xc5\xcb\x14\x34\xda\xc1\x55\x77\x2e\xd3\xe2\x69\x28\x00\x13\x01\x00" ++
+        "\x00\x2e\x00\x33\x00\x24\x00\x1d\x00\x20\xc9\x82\x88\x76\x11\x20\x95\xfe\x66\x76\x2b" ++
+        "\xdb\xf7\xc6\x72\xe1\x56\xd6\xcc\x25\x3b\x83\x3d\xf1\xdd\x69\xb1\xb0\x4e\x75\x1f\x0f" ++
+        "\x00\x2b\x00\x02\x03\x04";
+
+    var i_stream = streams.getPtr(.initial);
+    try i_stream.reciever.push(try allocator.dupe(u8, raw_sh), 0);
+
+    var ch = try provider.createClientHello(try packet.ConnectionId.init(0));
+    defer ch.deinit();
+    try provider.handleStream(i_stream, .initial);
+    try testing.expectEqualStrings(raw_sh, provider.raw_sh.?.data.items);
 }

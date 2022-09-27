@@ -112,7 +112,7 @@ pub const HandshakeRaw = struct {
 
     pub fn init(allocator: mem.Allocator, max_len: usize) !Self {
         return .{
-            .data = std.ArrayList(u8).initCapacity(
+            .data = try std.ArrayList(u8).initCapacity(
                 allocator,
                 max_len,
             ),
@@ -137,7 +137,8 @@ pub const HandshakeRaw = struct {
 
     pub fn write(self: *Self, buf: []const u8) !usize {
         const len = self.max_len - self.data.items.len;
-        self.data.appendSlice(buf[0..len]);
+        try self.data.appendSlice(buf[0..len]);
+        return len;
     }
 };
 
