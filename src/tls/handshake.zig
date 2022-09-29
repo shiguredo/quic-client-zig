@@ -137,7 +137,7 @@ pub const HandshakeRaw = struct {
     }
 
     pub fn write(self: *Self, buf: []const u8) !usize {
-        const len = 
+        const len =
             math.min(self.max_len - self.data.items.len, buf.len);
         try self.data.appendSlice(buf[0..len]);
         return len;
