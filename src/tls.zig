@@ -18,6 +18,7 @@ pub const Epoch = enum {
     zero_rtt,
     handshake,
     one_rtt,
+    no_crypto,
 };
 
 test {

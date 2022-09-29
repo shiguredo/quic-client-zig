@@ -4,6 +4,7 @@ const crypto = std.crypto;
 const testing = std.testing;
 const fmt = std.fmt;
 
+const connection = @import("../connection.zig");
 const q_crypto = @import("../crypto.zig");
 const tls = @import("../tls.zig");
 const HandshakeRaw = @import("handshake.zig").HandshakeRaw;
@@ -82,10 +83,13 @@ pub const Provider = struct {
 
     const BUF_SIZE = 2048;
 
-    pub fn init(allocator: mem.Allocator) Self {
-        return .{
+    pub fn init(allocator: mem.Allocator, c_dcid: []const u8) !Self {
+        var instance = Self{
             .allocator = allocator,
         };
+        instance.setUpInitial(c_dcid);
+        try instance.setUpMyX25519KeyPair();
+        return instance;
     }
 
     pub fn deinit(self: *Self) void {
@@ -97,99 +101,10 @@ pub const Provider = struct {
         if (self.raw_fin) |h| h.deinit();
     }
 
-    /// derives initial secret from client's destination connection ID
-    /// and set it to self.initial_secret
-    pub fn setUpInitial(self: *Self, key: []const u8) void {
-        const initial_secret = Hkdf.extract(&q_crypto.INITIAL_SALT_V1, key);
-        self.initial_secret = initial_secret;
-        var client_initial = QuicKeys{};
-        var server_initial = QuicKeys{};
-
-        q_crypto.hkdfExpandLabel(&client_initial.secret, initial_secret, "client in", "");
-        q_crypto.hkdfExpandLabel(&server_initial.secret, initial_secret, "server in", "");
-
-        q_crypto.hkdfExpandLabel(&client_initial.key, client_initial.secret, "quic key", "");
-        q_crypto.hkdfExpandLabel(&server_initial.key, server_initial.secret, "quic key", "");
-
-        q_crypto.hkdfExpandLabel(&client_initial.iv, client_initial.secret, "quic iv", "");
-        q_crypto.hkdfExpandLabel(&server_initial.iv, server_initial.secret, "quic iv", "");
-
-        q_crypto.hkdfExpandLabel(&client_initial.hp, client_initial.secret, "quic hp", "");
-        q_crypto.hkdfExpandLabel(&server_initial.hp, server_initial.secret, "quic hp", "");
-
-        self.client_initial = client_initial;
-        self.server_initial = server_initial;
-    }
-
-    /// setup early key
-    pub fn setUpEarly(self: *Self, psk: ?[]const u8) void {
-        const ikm = psk orelse &[_]u8{0} ** Hmac.key_length;
-        self.early_secret = Hkdf.extract(&[_]u8{0}, ikm);
-    }
-
-    pub fn createSharedKey(self: *Self) !void {
-        self.shared_key = if (self.x25519_keypair != null and self.x25519_peer != null) ecdhe: {
-            break :ecdhe try X25519.scalarmult(self.x25519_keypair.?.secret_key, self.x25519_peer.?);
-        } else return Error.KeyNotInstalled;
-    }
-
-    /// setup handshake key
-    pub fn setUpHandshake(self: *Self) !void {
-        const allocator = self.allocator;
-        const early_secret = self.early_secret orelse return Error.KeyNotInstalled;
-        var early_derived: [Sha256.digest_length]u8 = undefined;
-        q_crypto.deriveSecret(&early_derived, early_secret, "derived", "");
-
-        const ecdhe_input = self.shared_key orelse [_]u8{0} ** Hmac.key_length;
-        const hs_secret = Hkdf.extract(&early_derived, &ecdhe_input);
-        self.handshake_secret = hs_secret;
-
-        if (self.raw_ch == null) return Error.MessageNotInstalled;
-        if (self.raw_sh == null) return Error.MessageNotInstalled;
-        const message = try mem.concat(allocator, u8, &[_][]const u8{
-            self.raw_ch.?.data.items,
-            self.raw_sh.?.data.items,
-        });
-        defer allocator.free(message);
-
-        self.client_handshake = c_handshake: {
-            var secret: [Hmac.key_length]u8 = undefined;
-            q_crypto.deriveSecret(&secret, hs_secret, "c hs traffic", message);
-            var key: [QuicKeys.KEY_LENGTH]u8 = undefined;
-            q_crypto.hkdfExpandLabel(&key, secret, "quic key", "");
-            var iv: [QuicKeys.IV_LENGTH]u8 = undefined;
-            q_crypto.hkdfExpandLabel(&iv, secret, "quic iv", "");
-            var hp_key: [QuicKeys.HP_KEY_LENGTH]u8 = undefined;
-            q_crypto.hkdfExpandLabel(&hp_key, secret, "quic hp", "");
-            break :c_handshake QuicKeys{
-                .secret = secret,
-                .key = key,
-                .iv = iv,
-                .hp = hp_key,
-            };
-        };
-        self.server_handshake = s_handshake: {
-            var secret: [Hmac.key_length]u8 = undefined;
-            q_crypto.deriveSecret(&secret, hs_secret, "s hs traffic", message);
-            var key: [QuicKeys.KEY_LENGTH]u8 = undefined;
-            q_crypto.hkdfExpandLabel(&key, secret, "quic key", "");
-            var iv: [QuicKeys.IV_LENGTH]u8 = undefined;
-            q_crypto.hkdfExpandLabel(&iv, secret, "quic iv", "");
-            var hp_key: [QuicKeys.HP_KEY_LENGTH]u8 = undefined;
-            q_crypto.hkdfExpandLabel(&hp_key, secret, "quic hp", "");
-            break :s_handshake QuicKeys{
-                .secret = secret,
-                .key = key,
-                .iv = iv,
-                .hp = hp_key,
-            };
-        };
-    }
-
     /// returns ClientHello contained in Handshake union
     pub fn createClientHello(
         self: *Self,
-        quic_scid: packet.ConnectionId,
+        quic_scid: connection.ConnectionId,
     ) !tls.Handshake {
         const allocator = self.allocator;
         var c_hello = try tls.ClientHello.init(allocator);
@@ -286,6 +201,99 @@ pub const Provider = struct {
 
     // private functions
 
+    fn setUpMyX25519KeyPair(self: *Self) !void {
+        self.x25519_keypair = try crypto.dh.X25519.KeyPair.create(null);
+    }
+
+    fn deriveSharedKey(self: *Self) !void {
+        self.shared_key = if (self.x25519_keypair != null and self.x25519_peer != null) ecdhe: {
+            break :ecdhe try X25519.scalarmult(self.x25519_keypair.?.secret_key, self.x25519_peer.?);
+        } else return Error.KeyNotInstalled;
+    }
+
+    /// derives initial secret from client's destination connection ID
+    /// and set it to self.initial_secret
+    fn setUpInitial(self: *Self, key: []const u8) void {
+        const initial_secret = Hkdf.extract(&q_crypto.INITIAL_SALT_V1, key);
+        self.initial_secret = initial_secret;
+        var client_initial = QuicKeys{};
+        var server_initial = QuicKeys{};
+
+        q_crypto.hkdfExpandLabel(&client_initial.secret, initial_secret, "client in", "");
+        q_crypto.hkdfExpandLabel(&server_initial.secret, initial_secret, "server in", "");
+
+        q_crypto.hkdfExpandLabel(&client_initial.key, client_initial.secret, "quic key", "");
+        q_crypto.hkdfExpandLabel(&server_initial.key, server_initial.secret, "quic key", "");
+
+        q_crypto.hkdfExpandLabel(&client_initial.iv, client_initial.secret, "quic iv", "");
+        q_crypto.hkdfExpandLabel(&server_initial.iv, server_initial.secret, "quic iv", "");
+
+        q_crypto.hkdfExpandLabel(&client_initial.hp, client_initial.secret, "quic hp", "");
+        q_crypto.hkdfExpandLabel(&server_initial.hp, server_initial.secret, "quic hp", "");
+
+        self.client_initial = client_initial;
+        self.server_initial = server_initial;
+    }
+
+    /// setup early key
+    fn setUpEarly(self: *Self, psk: ?[]const u8) void {
+        const ikm = psk orelse &[_]u8{0} ** Hmac.key_length;
+        self.early_secret = Hkdf.extract(&[_]u8{0}, ikm);
+    }
+
+    /// setup handshake key
+    fn setUpHandshake(self: *Self) !void {
+        const allocator = self.allocator;
+        const early_secret = self.early_secret orelse return Error.KeyNotInstalled;
+        var early_derived: [Sha256.digest_length]u8 = undefined;
+        q_crypto.deriveSecret(&early_derived, early_secret, "derived", "");
+
+        const ecdhe_input = self.shared_key orelse [_]u8{0} ** Hmac.key_length;
+        const hs_secret = Hkdf.extract(&early_derived, &ecdhe_input);
+        self.handshake_secret = hs_secret;
+
+        if (self.raw_ch == null) return Error.MessageNotInstalled;
+        if (self.raw_sh == null) return Error.MessageNotInstalled;
+        const message = try mem.concat(allocator, u8, &[_][]const u8{
+            self.raw_ch.?.data.items,
+            self.raw_sh.?.data.items,
+        });
+        defer allocator.free(message);
+
+        self.client_handshake = c_handshake: {
+            var secret: [Hmac.key_length]u8 = undefined;
+            q_crypto.deriveSecret(&secret, hs_secret, "c hs traffic", message);
+            var key: [QuicKeys.KEY_LENGTH]u8 = undefined;
+            q_crypto.hkdfExpandLabel(&key, secret, "quic key", "");
+            var iv: [QuicKeys.IV_LENGTH]u8 = undefined;
+            q_crypto.hkdfExpandLabel(&iv, secret, "quic iv", "");
+            var hp_key: [QuicKeys.HP_KEY_LENGTH]u8 = undefined;
+            q_crypto.hkdfExpandLabel(&hp_key, secret, "quic hp", "");
+            break :c_handshake QuicKeys{
+                .secret = secret,
+                .key = key,
+                .iv = iv,
+                .hp = hp_key,
+            };
+        };
+        self.server_handshake = s_handshake: {
+            var secret: [Hmac.key_length]u8 = undefined;
+            q_crypto.deriveSecret(&secret, hs_secret, "s hs traffic", message);
+            var key: [QuicKeys.KEY_LENGTH]u8 = undefined;
+            q_crypto.hkdfExpandLabel(&key, secret, "quic key", "");
+            var iv: [QuicKeys.IV_LENGTH]u8 = undefined;
+            q_crypto.hkdfExpandLabel(&iv, secret, "quic iv", "");
+            var hp_key: [QuicKeys.HP_KEY_LENGTH]u8 = undefined;
+            q_crypto.hkdfExpandLabel(&hp_key, secret, "quic hp", "");
+            break :s_handshake QuicKeys{
+                .secret = secret,
+                .key = key,
+                .iv = iv,
+                .hp = hp_key,
+            };
+        };
+    }
+
     /// Reads bytes from self.raw_sh and handle it
     /// when self.raw_sh is not completed (its length is shorter
     /// than the length field indicates), does nothing
@@ -308,10 +316,15 @@ pub const Provider = struct {
             }
         }
 
+        // setup key
+        self.setUpEarly(null);
+        try self.setUpHandshake();
+
         // The next state is wait encrypted extensions
         self.state = .wait_ee;
     }
 
+    /// TODO: implement handling encrypted extensions
     fn handleEncryptedExtensions(
         self: *Self,
     ) !void {
@@ -320,11 +333,13 @@ pub const Provider = struct {
         if (!raw_bytes.isComplete())
             return;
 
+        // setup key
+
         self.state = .wait_cert_cr;
     }
 
-    /// TODO: implement appropriate handling certificate
-    pub fn handleCertificate(
+    /// TODO: implement handling certificate
+    fn handleCertificate(
         self: *Self,
     ) !void {
         const raw_bytes =
@@ -335,7 +350,7 @@ pub const Provider = struct {
         self.state = .wait_cv;
     }
 
-    /// TODO: implement appropriate handling certificate verify
+    /// TODO: implement handling certificate verify
     fn handleCertificateVerify(
         self: *Self,
     ) !void {
@@ -389,12 +404,111 @@ pub const Provider = struct {
             };
         }
     }
+
+    // tests using private functions
+
+    // test vectors from https://www.rfc-editor.org/rfc/rfc8448.html
+    test "Key schedule" {
+        const allocator = testing.allocator;
+
+        var provider = try tls.Provider.init(testing.allocator, "");
+        provider.setUpEarly(null);
+        try testing.expectFmt("33ad0a1c607ec03b09e6cd9893680ce210adf300aa1f2660e1b22e10f170f92a", "{x}", .{fmt.fmtSliceHexLower(&provider.early_secret.?)});
+
+        // zig fmt: off
+        const client_keypair = X25519.KeyPair{
+            .secret_key = [_]u8{
+                0x49, 0xaf, 0x42, 0xba, 0x7f, 0x79, 0x94, 0x85,
+                0x2d, 0x71, 0x3e, 0xf2, 0x78, 0x4b, 0xcb, 0xca,
+                0xa7, 0x91, 0x1d, 0xe2, 0x6a, 0xdc, 0x56, 0x42,
+                0xcb, 0x63, 0x45, 0x40, 0xe7, 0xea, 0x50, 0x05,
+            },
+            .public_key = [_]u8{
+                0x99, 0x38, 0x1d, 0xe5, 0x60, 0xe4, 0xbd, 0x43,
+                0xd2, 0x3d, 0x8e, 0x43, 0x5a, 0x7d, 0xba, 0xfe,
+                0xb3, 0xc0, 0x6e, 0x51, 0xc1, 0x3c, 0xae, 0x4d,
+                0x54, 0x13, 0x69, 0x1e, 0x52, 0x9a, 0xaf, 0x2c,
+            },
+        };
+        const server_keypair = X25519.KeyPair{
+            .secret_key = [_]u8{
+                0xb1, 0x58, 0x0e, 0xea, 0xdf, 0x6d, 0xd5, 0x89,
+                0xb8, 0xef, 0x4f, 0x2d, 0x56, 0x52, 0x57, 0x8c,
+                0xc8, 0x10, 0xe9, 0x98, 0x01, 0x91, 0xec, 0x8d,
+                0x05, 0x83, 0x08, 0xce, 0xa2, 0x16, 0xa2, 0x1e,
+            },
+            .public_key = [_]u8{
+                0xc9, 0x82, 0x88, 0x76, 0x11, 0x20, 0x95, 0xfe,
+                0x66, 0x76, 0x2b, 0xdb, 0xf7, 0xc6, 0x72, 0xe1,
+                0x56, 0xd6, 0xcc, 0x25, 0x3b, 0x83, 0x3d, 0xf1,
+                0xdd, 0x69, 0xb1, 0xb0, 0x4e, 0x75, 0x1f, 0x0f,
+            },
+        };
+        // zig fmt: on
+        provider.x25519_keypair = client_keypair;
+        provider.x25519_peer = server_keypair.public_key;
+        try provider.deriveSharedKey();
+        try testing.expectFmt(
+            "8bd4054fb55b9d63fdfbacf9f04b9f0d35e6d63f537563efd46272900f89492d",
+            "{x}",
+            .{fmt.fmtSliceHexLower(&provider.shared_key.?)},
+        );
+
+        const client_hello_bytes =
+            "\x01\x00\x00\xc0\x03\x03\xcb\x34\xec\xb1\xe7\x81\x63\xba\x1c\x38\xc6\xda\xcb\x19\x6a" ++
+            "\x6d\xff\xa2\x1a\x8d\x99\x12\xec\x18\xa2\xef\x62\x83\x02\x4d\xec\xe7\x00\x00\x06\x13" ++
+            "\x01\x13\x03\x13\x02\x01\x00\x00\x91\x00\x00\x00\x0b\x00\x09\x00\x00\x06\x73\x65\x72" ++
+            "\x76\x65\x72\xff\x01\x00\x01\x00\x00\x0a\x00\x14\x00\x12\x00\x1d\x00\x17\x00\x18\x00" ++
+            "\x19\x01\x00\x01\x01\x01\x02\x01\x03\x01\x04\x00\x23\x00\x00\x00\x33\x00\x26\x00\x24" ++
+            "\x00\x1d\x00\x20\x99\x38\x1d\xe5\x60\xe4\xbd\x43\xd2\x3d\x8e\x43\x5a\x7d\xba\xfe\xb3" ++
+            "\xc0\x6e\x51\xc1\x3c\xae\x4d\x54\x13\x69\x1e\x52\x9a\xaf\x2c\x00\x2b\x00\x03\x02\x03" ++
+            "\x04\x00\x0d\x00\x20\x00\x1e\x04\x03\x05\x03\x06\x03\x02\x03\x08\x04\x08\x05\x08\x06" ++
+            "\x04\x01\x05\x01\x06\x01\x02\x01\x04\x02\x05\x02\x06\x02\x02\x02\x00\x2d\x00\x02\x01" ++
+            "\x01\x00\x1c\x00\x02\x40\x01";
+        const server_hello_bytes =
+            "\x02\x00\x00\x56\x03\x03\xa6\xaf\x06\xa4\x12\x18\x60\xdc\x5e\x6e\x60\x24\x9c\xd3\x4c" ++
+            "\x95\x93\x0c\x8a\xc5\xcb\x14\x34\xda\xc1\x55\x77\x2e\xd3\xe2\x69\x28\x00\x13\x01\x00" ++
+            "\x00\x2e\x00\x33\x00\x24\x00\x1d\x00\x20\xc9\x82\x88\x76\x11\x20\x95\xfe\x66\x76\x2b" ++
+            "\xdb\xf7\xc6\x72\xe1\x56\xd6\xcc\x25\x3b\x83\x3d\xf1\xdd\x69\xb1\xb0\x4e\x75\x1f\x0f" ++
+            "\x00\x2b\x00\x02\x03\x04";
+
+        provider.raw_ch = ch: {
+            var temp = std.ArrayList(u8).init(allocator);
+            try temp.appendSlice(client_hello_bytes);
+            break :ch HandshakeRaw.fromArrayList(temp);
+        };
+        defer provider.raw_ch.?.deinit();
+
+        provider.raw_sh = sh: {
+            var temp = std.ArrayList(u8).init(allocator);
+            try temp.appendSlice(server_hello_bytes);
+            break :sh HandshakeRaw.fromArrayList(temp);
+        };
+        defer provider.raw_sh.?.deinit();
+
+        try provider.setUpHandshake();
+        try testing.expectFmt(
+            "1dc826e93606aa6fdc0aadc12f741b01046aa6b99f691ed221a9f0ca043fbeac",
+            "{x}",
+            .{std.fmt.fmtSliceHexLower(&provider.handshake_secret.?)},
+        );
+        try testing.expectFmt(
+            "b3eddb126e067f35a780b3abf45e2d8f3b1a950738f52e9600746a0e27a55a21",
+            "{x}",
+            .{std.fmt.fmtSliceHexLower(&provider.client_handshake.?.secret)},
+        );
+        try testing.expectFmt(
+            "b67b7d690cc16c4e75e54213cb2d37b4e9c912bcded9105d42befd59d391ad38",
+            "{x}",
+            .{std.fmt.fmtSliceHexLower(&provider.server_handshake.?.secret)},
+        );
+    }
 };
 
 test "setUpInitial" {
     // test vectors from https://www.rfc-editor.org/rfc/rfc9001#name-sample-packet-protection
-    var tls_provider = tls.Provider.init(testing.allocator);
-    tls_provider.setUpInitial(
+    var tls_provider = try tls.Provider.init(
+        testing.allocator,
         &[_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 },
     );
 
@@ -465,103 +579,6 @@ test "setUpInitial" {
     );
 }
 
-// test vectors from https://www.rfc-editor.org/rfc/rfc8448.html
-test "Key schedule" {
-    const allocator = testing.allocator;
-
-    var provider = tls.Provider.init(testing.allocator);
-    provider.setUpEarly(null);
-    try testing.expectFmt("33ad0a1c607ec03b09e6cd9893680ce210adf300aa1f2660e1b22e10f170f92a", "{x}", .{fmt.fmtSliceHexLower(&provider.early_secret.?)});
-
-    // zig fmt: off
-    const client_keypair = X25519.KeyPair{
-        .secret_key = [_]u8{
-            0x49, 0xaf, 0x42, 0xba, 0x7f, 0x79, 0x94, 0x85,
-            0x2d, 0x71, 0x3e, 0xf2, 0x78, 0x4b, 0xcb, 0xca,
-            0xa7, 0x91, 0x1d, 0xe2, 0x6a, 0xdc, 0x56, 0x42,
-            0xcb, 0x63, 0x45, 0x40, 0xe7, 0xea, 0x50, 0x05,
-        },
-        .public_key = [_]u8{
-            0x99, 0x38, 0x1d, 0xe5, 0x60, 0xe4, 0xbd, 0x43,
-            0xd2, 0x3d, 0x8e, 0x43, 0x5a, 0x7d, 0xba, 0xfe,
-            0xb3, 0xc0, 0x6e, 0x51, 0xc1, 0x3c, 0xae, 0x4d,
-            0x54, 0x13, 0x69, 0x1e, 0x52, 0x9a, 0xaf, 0x2c,
-        },
-    };
-    const server_keypair = X25519.KeyPair{
-        .secret_key = [_]u8{
-            0xb1, 0x58, 0x0e, 0xea, 0xdf, 0x6d, 0xd5, 0x89,
-            0xb8, 0xef, 0x4f, 0x2d, 0x56, 0x52, 0x57, 0x8c,
-            0xc8, 0x10, 0xe9, 0x98, 0x01, 0x91, 0xec, 0x8d,
-            0x05, 0x83, 0x08, 0xce, 0xa2, 0x16, 0xa2, 0x1e,
-        },
-        .public_key = [_]u8{
-            0xc9, 0x82, 0x88, 0x76, 0x11, 0x20, 0x95, 0xfe,
-            0x66, 0x76, 0x2b, 0xdb, 0xf7, 0xc6, 0x72, 0xe1,
-            0x56, 0xd6, 0xcc, 0x25, 0x3b, 0x83, 0x3d, 0xf1,
-            0xdd, 0x69, 0xb1, 0xb0, 0x4e, 0x75, 0x1f, 0x0f,
-        },
-    };
-    // zig fmt: on
-    provider.x25519_keypair = client_keypair;
-    provider.x25519_peer = server_keypair.public_key;
-    try provider.createSharedKey();
-    try testing.expectFmt(
-        "8bd4054fb55b9d63fdfbacf9f04b9f0d35e6d63f537563efd46272900f89492d",
-        "{x}",
-        .{fmt.fmtSliceHexLower(&provider.shared_key.?)},
-    );
-
-    const client_hello_bytes =
-        "\x01\x00\x00\xc0\x03\x03\xcb\x34\xec\xb1\xe7\x81\x63\xba\x1c\x38\xc6\xda\xcb\x19\x6a" ++
-        "\x6d\xff\xa2\x1a\x8d\x99\x12\xec\x18\xa2\xef\x62\x83\x02\x4d\xec\xe7\x00\x00\x06\x13" ++
-        "\x01\x13\x03\x13\x02\x01\x00\x00\x91\x00\x00\x00\x0b\x00\x09\x00\x00\x06\x73\x65\x72" ++
-        "\x76\x65\x72\xff\x01\x00\x01\x00\x00\x0a\x00\x14\x00\x12\x00\x1d\x00\x17\x00\x18\x00" ++
-        "\x19\x01\x00\x01\x01\x01\x02\x01\x03\x01\x04\x00\x23\x00\x00\x00\x33\x00\x26\x00\x24" ++
-        "\x00\x1d\x00\x20\x99\x38\x1d\xe5\x60\xe4\xbd\x43\xd2\x3d\x8e\x43\x5a\x7d\xba\xfe\xb3" ++
-        "\xc0\x6e\x51\xc1\x3c\xae\x4d\x54\x13\x69\x1e\x52\x9a\xaf\x2c\x00\x2b\x00\x03\x02\x03" ++
-        "\x04\x00\x0d\x00\x20\x00\x1e\x04\x03\x05\x03\x06\x03\x02\x03\x08\x04\x08\x05\x08\x06" ++
-        "\x04\x01\x05\x01\x06\x01\x02\x01\x04\x02\x05\x02\x06\x02\x02\x02\x00\x2d\x00\x02\x01" ++
-        "\x01\x00\x1c\x00\x02\x40\x01";
-    const server_hello_bytes =
-        "\x02\x00\x00\x56\x03\x03\xa6\xaf\x06\xa4\x12\x18\x60\xdc\x5e\x6e\x60\x24\x9c\xd3\x4c" ++
-        "\x95\x93\x0c\x8a\xc5\xcb\x14\x34\xda\xc1\x55\x77\x2e\xd3\xe2\x69\x28\x00\x13\x01\x00" ++
-        "\x00\x2e\x00\x33\x00\x24\x00\x1d\x00\x20\xc9\x82\x88\x76\x11\x20\x95\xfe\x66\x76\x2b" ++
-        "\xdb\xf7\xc6\x72\xe1\x56\xd6\xcc\x25\x3b\x83\x3d\xf1\xdd\x69\xb1\xb0\x4e\x75\x1f\x0f" ++
-        "\x00\x2b\x00\x02\x03\x04";
-
-    provider.raw_ch = ch: {
-        var temp = std.ArrayList(u8).init(allocator);
-        try temp.appendSlice(client_hello_bytes);
-        break :ch HandshakeRaw.fromArrayList(temp);
-    };
-    defer provider.raw_ch.?.deinit();
-
-    provider.raw_sh = sh: {
-        var temp = std.ArrayList(u8).init(allocator);
-        try temp.appendSlice(server_hello_bytes);
-        break :sh HandshakeRaw.fromArrayList(temp);
-    };
-    defer provider.raw_sh.?.deinit();
-
-    try provider.setUpHandshake();
-    try testing.expectFmt(
-        "1dc826e93606aa6fdc0aadc12f741b01046aa6b99f691ed221a9f0ca043fbeac",
-        "{x}",
-        .{std.fmt.fmtSliceHexLower(&provider.handshake_secret.?)},
-    );
-    try testing.expectFmt(
-        "b3eddb126e067f35a780b3abf45e2d8f3b1a950738f52e9600746a0e27a55a21",
-        "{x}",
-        .{std.fmt.fmtSliceHexLower(&provider.client_handshake.?.secret)},
-    );
-    try testing.expectFmt(
-        "b67b7d690cc16c4e75e54213cb2d37b4e9c912bcded9105d42befd59d391ad38",
-        "{x}",
-        .{std.fmt.fmtSliceHexLower(&provider.server_handshake.?.secret)},
-    );
-}
-
 fn allocParseHex(in: []const u8) ![]u8 {
     const buf = try testing.allocator.alloc(u8, in.len);
     return try fmt.hexToBytes(buf, in);
@@ -570,7 +587,7 @@ fn allocParseHex(in: []const u8) ![]u8 {
 // simple 1-RTT Handshake from https://www.rfc-editor.org/rfc/rfc8448.html#section-3
 test "handleStream" {
     const allocator = testing.allocator;
-    var client = Provider.init(allocator);
+    var client = try Provider.init(allocator, "");
     defer client.deinit();
     client.x25519_keypair = try crypto.dh.X25519.KeyPair.create(null);
     var streams = CryptoStreams.init(allocator);

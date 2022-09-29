@@ -15,23 +15,41 @@ const RangeSet = @import("range_set.zig").RangeSet;
 
 pub const QuicConfig = struct {};
 
+const MAX_CID_LENGTH = 255;
+pub const ConnectionId = std.BoundedArray(u8, MAX_CID_LENGTH);
+
 pub const QuicSocket = struct {
     tls_provider: tls.Provider,
     dg_socket: udp.DatagramSocket,
     c_streams: stream.CryptoStreams,
     ack_ranges: RangeSet,
+
+    dcid: ConnectionId,
+    scid: ConnectionId,
+
     allocator: mem.Allocator,
 
     const Self = @This();
 
-    pub fn init(address: net.Address, allocator: mem.Allocator) !Self {
-        var dg_socket = try udp.udpConnectToAddress(address);
+    pub fn init(udp_sock: udp.DatagramSocket, allocator: mem.Allocator) !Self {
+        const scid = scid: {
+            var id = try ConnectionId.init(8);
+            crypto.random.bytes(id.slice());
+            break :scid id;
+        };
+        const dcid = dcid: {
+            var id = try ConnectionId.init(8);
+            crypto.random.bytes(id.slice());
+            break :dcid id;
+        };
 
         return .{
-            .tls_provider = tls.Provider.init(allocator),
-            .dg_socket = dg_socket,
+            .tls_provider = try tls.Provider.init(allocator, dcid.constSlice()),
+            .dg_socket = udp_sock,
             .c_streams = stream.CryptoStreams.init(allocator),
             .ack_ranges = RangeSet.init(allocator),
+            .dcid = dcid,
+            .scid = scid,
             .allocator = allocator,
         };
     }
@@ -43,24 +61,8 @@ pub const QuicSocket = struct {
 
     /// Start handshake
     pub fn connnect(self: *Self) !void {
-        const scid = scid: {
-            var id = try packet.ConnectionId.init(8);
-            crypto.random.bytes(id.slice());
-            break :scid id;
-        };
-        const dcid = dcid: {
-            var id = try packet.ConnectionId.init(8);
-            crypto.random.bytes(id.slice());
-            break :dcid id;
-        };
-
-        // setup tls
-        self.tls_provider.setUpInitial(dcid.constSlice());
-
-        self.tls_provider.x25519_keypair = try crypto.dh.X25519.KeyPair.create(null);
-
         var c_hello_frame = ch: {
-            var c_hello = try self.tls_provider.createClientHello(scid);
+            var c_hello = try self.tls_provider.createClientHello(self.scid);
             defer c_hello.deinit();
             var ch_frame = frame.CryptoFrame{
                 .offset = try util.VariableLengthInt.fromInt(0),
@@ -75,8 +77,8 @@ pub const QuicSocket = struct {
 
         var c_initial = packet.LongHeaderPacket{
             .flags = packet.LongHeaderFlags.initial(1),
-            .dst_cid = dcid,
-            .src_cid = scid,
+            .dst_cid = self.dcid,
+            .src_cid = self.scid,
             .token = std.ArrayList(u8).init(self.allocator),
             .packet_number = 0x00,
             .payload = p: {
@@ -96,6 +98,14 @@ pub const QuicSocket = struct {
         _ = try self.dg_socket.write(w_buf.getUnreadSlice());
     }
 
+    pub fn isConnected(self: Self) bool {
+        // TODO: implement
+        _ = self;
+        return false;
+    }
+
+    // prvate functions below
+
     /// recieve data from udp socket and handle it.
     pub fn recv(self: *Self, buf: []const u8) !void {
         var s = std.io.fixedBufferStream(buf);
@@ -105,23 +115,27 @@ pub const QuicSocket = struct {
             self.allocator,
             self.tls_provider,
         )) |pkt| {
-            self.handlePacket(pkt);
+            try self.handlePacket(pkt);
         } else |err| {
             if (err != error.EndOfStream) return err;
         }
     }
 
     /// transmit data if needed (TODO: implementation)
-    pub fn transmit(self: *Self) !void {
+    fn transmit(self: *Self) !void {
         _ = self;
     }
 
-    pub fn handlePacket(self: *Self, pkt: packet.LongHeaderPacket) !void {
-        for (pkt.payload) |frm| {
+    fn handlePacket(self: *Self, pkt: packet.LongHeaderPacket) !void {
+        const epoch = pkt.flags.packet_type.toEpoch();
+        for (pkt.payload.items) |frm| {
             switch (frm) {
                 .padding => {},
                 .ack => {},
-                .crypto => |f| self.handleCryptoFrame(f),
+                .crypto => |f| {
+                    if (epoch == .no_crypto) return error.ProtocolViolation;
+                    try self.handleCryptoFrame(f, epoch);
+                },
                 .stream => {},
                 .handshake_done => {},
             }
@@ -130,13 +144,13 @@ pub const QuicSocket = struct {
         try self.transmit();
     }
 
-    pub fn handleCryptoFrame(self: *Self, c_frame: frame.CryptoFrame, epoch: tls.Epoch) !void {
+    fn handleCryptoFrame(self: *Self, c_frame: frame.CryptoFrame, epoch: tls.Epoch) !void {
         var cs = self.c_streams.getPtr(epoch);
         try cs.reciever.push(
             c_frame.data.items,
             @intCast(usize, c_frame.offset.value),
         );
-        try self.tls_provider.handleStream(cs, epoch);
+        try self.tls_provider.handleStream(cs);
     }
 };
 
@@ -144,10 +158,18 @@ test "connect()" {
     // To run this test, set QUIC_CONNECTION_TEST_ENABLED=1
     if (std.os.getenv("QUIC_CONNECTION_TEST_ENABLED")) |_| {} else return error.SkipZigTest;
 
-    var sock = try QuicSocket.init(
-        net.Address.initIp4(.{ 127, 0, 0, 1 }, 4433),
+    var udp_sock = try udp.udpConnectToAddress(net.Address.initIp4(.{ 127, 0, 0, 1 }, 4433));
+    var conn = try QuicSocket.init(
+        udp_sock,
         testing.allocator,
     );
-    defer sock.close();
-    try sock.connnect();
+
+    var buf = [_]u8{0} ** 4096;
+    while (true) {
+        if (conn.isConnected()) break;
+        const n = try udp_sock.read(&buf);
+        try conn.recv(buf[0..n]);
+    }
+    defer conn.close();
+    try conn.connnect();
 }

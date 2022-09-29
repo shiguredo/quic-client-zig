@@ -4,6 +4,7 @@ const aes_gcm = crypto.aead.aes_gcm;
 const mem = std.mem;
 const testing = std.testing;
 
+const connection = @import("connection.zig");
 const util = @import("util.zig");
 const frame = @import("frame.zig");
 const tls = @import("tls.zig");
@@ -24,12 +25,12 @@ pub const LongHeaderPacketTypes = enum(u2) {
 
     const Self = @This();
 
-    pub fn toEpoch(self: Self) !tls.Epoch {
+    pub fn toEpoch(self: Self) tls.Epoch {
         return switch (self) {
             .initial => .initial,
             .zero_rtt => .zero_rtt,
             .handshake => .handshake,
-            else => return error.ValueError,
+            else => .no_crypto,
         };
     }
 };
@@ -73,11 +74,10 @@ pub const LongHeaderFlags = packed struct {
     }
 };
 
-const MAX_CID_LENGTH = 255;
 const MIN_UDP_PAYLOAD_LENGTH = 1200;
+const ConnectionId = connection.ConnectionId;
 
 pub const QUIC_VERSION_1 = 0x00000001;
-pub const ConnectionId = std.BoundedArray(u8, MAX_CID_LENGTH);
 
 pub const LongHeaderPacket = struct {
     flags: LongHeaderFlags,
@@ -341,8 +341,7 @@ test "decode initial packet" {
     );
     // zig fmt: on
     var stream = std.io.fixedBufferStream(&server_initial);
-    var tls_provider = tls.Provider.init(testing.allocator);
-    tls_provider.setUpInitial("\x76\x49\x73\x32\xb6\x4c\x00\x9c");
+    var tls_provider = try tls.Provider.init(testing.allocator, "\x76\x49\x73\x32\xb6\x4c\x00\x9c");
     const initial_packet = try LongHeaderPacket.decodeEncrypted(stream.reader(), testing.allocator, tls_provider);
     defer initial_packet.deinit();
 
