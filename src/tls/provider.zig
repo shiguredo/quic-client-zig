@@ -32,6 +32,40 @@ pub const State = enum {
     connected,
 };
 
+pub const QuicKeys = struct {
+    secret: [Hmac.key_length]u8 = undefined,
+    key: [KEY_LENGTH]u8 = undefined,
+    iv: [IV_LENGTH]u8 = undefined,
+    hp: [HP_KEY_LENGTH]u8 = undefined,
+
+    const KEY_LENGTH = 16;
+    const IV_LENGTH = 12;
+    const HP_KEY_LENGTH = 16;
+
+    const Self = @This();
+
+    /// derive keys for client
+    pub fn deriveClient(tls_secret: [Hmac.key_length]u8, message: []const u8) Self {
+        var instance: Self = undefined;
+        q_crypto.deriveSecret(&instance.secret, tls_secret, "c hs traffic", message);
+        return instance;
+    }
+
+    /// derive keys for server
+    pub fn deriveServer(tls_secret: [Hmac.key_length]u8, message: []const u8) Self {
+        var instance: Self = undefined;
+        q_crypto.deriveSecret(&instance.secret, tls_secret, "s hs traffic", message);
+        return instance;
+    }
+
+    /// derive self's keys with its secret
+    fn deriveWithSecret(self: *Self) void {
+        q_crypto.hkdfExpandLabel(&self.key, self.secret, "quic key", "");
+        q_crypto.hkdfExpandLabel(&self.iv, self.secret, "quic iv", "");
+        q_crypto.hkdfExpandLabel(&self.hp_key, self.secret, "quic hp", "");
+    }
+};
+
 pub const Provider = struct {
     state: State = .start,
 
@@ -69,17 +103,6 @@ pub const Provider = struct {
     pub const Error = error{ KeyNotInstalled, MessageNotInstalled };
     const HandshakeHandlingError =
         error{ MessageIncomplete, HandshakeTypeError };
-
-    pub const QuicKeys = struct {
-        secret: [Hmac.key_length]u8 = undefined,
-        key: [KEY_LENGTH]u8 = undefined,
-        iv: [IV_LENGTH]u8 = undefined,
-        hp: [HP_KEY_LENGTH]u8 = undefined,
-
-        const KEY_LENGTH = 16;
-        const IV_LENGTH = 12;
-        const HP_KEY_LENGTH = 16;
-    };
 
     const BUF_SIZE = 2048;
 
@@ -260,38 +283,8 @@ pub const Provider = struct {
         });
         defer allocator.free(message);
 
-        self.client_handshake = c_handshake: {
-            var secret: [Hmac.key_length]u8 = undefined;
-            q_crypto.deriveSecret(&secret, hs_secret, "c hs traffic", message);
-            var key: [QuicKeys.KEY_LENGTH]u8 = undefined;
-            q_crypto.hkdfExpandLabel(&key, secret, "quic key", "");
-            var iv: [QuicKeys.IV_LENGTH]u8 = undefined;
-            q_crypto.hkdfExpandLabel(&iv, secret, "quic iv", "");
-            var hp_key: [QuicKeys.HP_KEY_LENGTH]u8 = undefined;
-            q_crypto.hkdfExpandLabel(&hp_key, secret, "quic hp", "");
-            break :c_handshake QuicKeys{
-                .secret = secret,
-                .key = key,
-                .iv = iv,
-                .hp = hp_key,
-            };
-        };
-        self.server_handshake = s_handshake: {
-            var secret: [Hmac.key_length]u8 = undefined;
-            q_crypto.deriveSecret(&secret, hs_secret, "s hs traffic", message);
-            var key: [QuicKeys.KEY_LENGTH]u8 = undefined;
-            q_crypto.hkdfExpandLabel(&key, secret, "quic key", "");
-            var iv: [QuicKeys.IV_LENGTH]u8 = undefined;
-            q_crypto.hkdfExpandLabel(&iv, secret, "quic iv", "");
-            var hp_key: [QuicKeys.HP_KEY_LENGTH]u8 = undefined;
-            q_crypto.hkdfExpandLabel(&hp_key, secret, "quic hp", "");
-            break :s_handshake QuicKeys{
-                .secret = secret,
-                .key = key,
-                .iv = iv,
-                .hp = hp_key,
-            };
-        };
+        self.client_handshake = QuicKeys.deriveClient(hs_secret, message);
+        self.server_handshake = QuicKeys.deriveServer(hs_secret, message);
     }
 
     /// Reads bytes from self.raw_sh and handle it
