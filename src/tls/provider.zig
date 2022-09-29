@@ -248,16 +248,12 @@ pub const Provider = struct {
                 .wait_sh => {
                     if (epoch != .initial)
                         return error.StateError;
-                    if (self.raw_sh) |*raw_sh| {
-                        try handleRaw(raw_sh, &buf);
-                    } else {
-                        self.raw_sh = createRaw(&buf, self.allocator) catch |err| {
-                            if (err == error.DataTooShort) {
-                                buf.realign();
-                                continue :read_loop;
-                            } else return err;
-                        };
-                    }
+                    handleRaw(&self.raw_sh, &buf, self.allocator) catch |err| {
+                        if (err == error.DataTooShort) {
+                            buf.realign();
+                            continue :read_loop;
+                        } else return err;
+                    };
                     try self.handleServerHello();
                 },
                 .wait_ee => {},
@@ -298,30 +294,32 @@ pub const Provider = struct {
         _ = self;
     }
 
-    fn handleRaw(raw: *HandshakeRaw, buf_ptr: *Buffer(BUF_SIZE)) !void {
-        const n = try raw.write(buf_ptr.getUnreadSlice());
-        buf_ptr.discard(n);
-        if (buf_ptr.unreadLength() == 0)
-            buf_ptr.clear()
-        else
+    fn handleRaw(
+        raw_ptr: *?HandshakeRaw,
+        buf_ptr: *Buffer(BUF_SIZE),
+        allocator: mem.Allocator,
+    ) !void {
+        if (raw_ptr.*) |*raw| {
+            const n = try raw.write(buf_ptr.getUnreadSlice());
+            buf_ptr.discard(n);
             buf_ptr.realign();
-    }
-
-    fn createRaw(buf_ptr: *Buffer(BUF_SIZE), allocator: mem.Allocator) !HandshakeRaw {
-        return blk: {
-            if (buf_ptr.unreadLength() < 4) {
-                return error.DataTooShort;
-            }
-            const slice =
-                buf_ptr.getUnreadSlice();
-            const max_len =
-                mem.readIntBig(u24, slice[1..4]) + 4;
-            var raw = try HandshakeRaw.init(
-                allocator,
-                @intCast(usize, max_len),
-            );
-            break :blk raw;
-        };
+        } else {
+            raw_ptr.* = blk: {
+                if (buf_ptr.unreadLength() < 4) {
+                    return error.DataTooShort;
+                }
+                const slice =
+                    buf_ptr.getUnreadSlice();
+                const max_len =
+                    mem.readIntBig(u24, slice[1..4]) + 4;
+                var raw = try HandshakeRaw.init(
+                    allocator,
+                    @intCast(usize, max_len),
+                );
+                buf_ptr.realign();
+                break :blk raw;
+            };
+        }
     }
 };
 
