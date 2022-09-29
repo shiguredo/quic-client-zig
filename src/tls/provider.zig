@@ -343,6 +343,7 @@ pub const Provider = struct {
 
         // setup key
         self.setUpEarly(null);
+        try self.deriveSharedKey();
         try self.setUpHandshake();
 
         // The next state is wait encrypted extensions
@@ -606,7 +607,7 @@ test "setUpInitial" {
 }
 
 fn allocParseHex(in: []const u8) ![]u8 {
-    const buf = try testing.allocator.alloc(u8, in.len);
+    const buf = try testing.allocator.alloc(u8, in.len / 2);
     return try fmt.hexToBytes(buf, in);
 }
 
@@ -615,7 +616,6 @@ test "handleStream" {
     const allocator = testing.allocator;
     var client = try Provider.init(allocator, "");
     defer client.deinit();
-    client.x25519_keypair = try crypto.dh.X25519.KeyPair.create(null);
     var streams = CryptoStreams.init(allocator);
     defer streams.deinit();
 
@@ -623,21 +623,22 @@ test "handleStream" {
 
     // 1-1. set client hello to client
     const raw_ch_bytes =
-        "\x01\x00\x00\xc0\x03\x03\xcb\x34\xec\xb1\xe7\x81\x63\xba\x1c\x38\xc6\xda\xcb\x19\x6a" ++
-        "\x6d\xff\xa2\x1a\x8d\x99\x12\xec\x18\xa2\xef\x62\x83\x02\x4d\xec\xe7\x00\x00\x06\x13" ++
-        "\x01\x13\x03\x13\x02\x01\x00\x00\x91\x00\x00\x00\x0b\x00\x09\x00\x00\x06\x73\x65\x72" ++
-        "\x76\x65\x72\xff\x01\x00\x01\x00\x00\x0a\x00\x14\x00\x12\x00\x1d\x00\x17\x00\x18\x00" ++
-        "\x19\x01\x00\x01\x01\x01\x02\x01\x03\x01\x04\x00\x23\x00\x00\x00\x33\x00\x26\x00\x24" ++
-        "\x00\x1d\x00\x20\x99\x38\x1d\xe5\x60\xe4\xbd\x43\xd2\x3d\x8e\x43\x5a\x7d\xba\xfe\xb3" ++
-        "\xc0\x6e\x51\xc1\x3c\xae\x4d\x54\x13\x69\x1e\x52\x9a\xaf\x2c\x00\x2b\x00\x03\x02\x03" ++
-        "\x04\x00\x0d\x00\x20\x00\x1e\x04\x03\x05\x03\x06\x03\x02\x03\x08\x04\x08\x05\x08\x06" ++
-        "\x04\x01\x05\x01\x06\x01\x02\x01\x04\x02\x05\x02\x06\x02\x02\x02\x00\x2d\x00\x02\x01" ++
-        "\x01\x00\x1c\x00\x02\x40\x01";
-    client.raw_ch = HandshakeRaw.fromArrayList(data: {
-        var arr = std.ArrayList(u8).init(allocator);
-        try arr.appendSlice(raw_ch_bytes);
-        break :data arr;
-    });
+        "010000c00303cb34ecb1e78163ba1c38c6dacb196a" ++
+        "6dffa21a8d9912ec18a2ef6283024dece700000613" ++
+        "0113031302010000910000000b0009000006736572" ++
+        "766572ff01000100000a00140012001d0017001800" ++
+        "190100010101020103010400230000003300260024" ++
+        "001d002099381de560e4bd43d23d8e435a7dbafeb3" ++
+        "c06e51c13cae4d5413691e529aaf2c002b00030203" ++
+        "04000d0020001e0403050306030203080408050806" ++
+        "04010501060102010402050206020202002d000201" ++
+        "01001c00024001";
+    client.raw_ch = HandshakeRaw.fromArrayList(
+        std.ArrayList(u8).fromOwnedSlice(
+            allocator,
+            try allocParseHex(raw_ch_bytes),
+        ),
+    );
 
     // 1-2. set key share to client
     client.x25519_keypair = .{
@@ -647,6 +648,13 @@ test "handleStream" {
 
     // 1-3. set client.state .wait_sh
     client.state = .wait_sh;
+
+    // 1-4. test
+    try testing.expectFmt(
+        raw_ch_bytes,
+        "{s}",
+        .{fmt.fmtSliceHexLower(client.raw_ch.?.data.items)},
+    );
 
     // 2. recieve server hello
     const raw_sh_bytes =
@@ -664,6 +672,7 @@ test "handleStream" {
     try client.handleStream(i_stream);
 
     // 2-3. test
+    // 2-3-1. check input data successfully
     try testing.expectEqual(raw_sh_bytes.len / 2, client.raw_sh.?.max_len);
     try testing.expectFmt(
         raw_sh_bytes,
@@ -674,6 +683,18 @@ test "handleStream" {
         u8,
         "\xc9\x82\x88\x76\x11\x20\x95\xfe\x66\x76\x2b\xdb\xf7\xc6\x72\xe1\x56\xd6\xcc\x25\x3b\x83\x3d\xf1\xdd\x69\xb1\xb0\x4e\x75\x1f\x0f",
         &client.x25519_peer.?,
+    );
+
+    // 2-3-2. check derive keys successfully
+    try testing.expectFmt(
+        "33ad0a1c607ec03b09e6cd9893680ce210adf300aa1f2660e1b22e10f170f92a",
+        "{s}",
+        .{fmt.fmtSliceHexLower(&client.early_secret.?)},
+    );
+    try testing.expectFmt(
+        "1dc826e93606aa6fdc0aadc12f741b01046aa6b99f691ed221a9f0ca043fbeac",
+        "{s}",
+        .{fmt.fmtSliceHexLower(&client.handshake_secret.?)},
     );
 
     // 3. recieve encryted extensions, certificate, certificate verify, finished
@@ -741,6 +762,7 @@ test "handleStream" {
     try client.handleStream(h_stream);
 
     // 3-3. test
+    // 3-3-1. check input data successfully
     try testing.expectEqual(raw_ee_bytes.len / 2, client.raw_ee.?.max_len);
     try testing.expectEqual(raw_cert_bytes.len / 2, client.raw_cert.?.max_len);
     try testing.expectEqual(raw_cv_bytes.len / 2, client.raw_cv.?.max_len);
@@ -764,5 +786,12 @@ test "handleStream" {
         raw_sfin_bytes,
         "{s}",
         .{fmt.fmtSliceHexLower(client.raw_sfin.?.data.items)},
+    );
+
+    // 3-3-2. check derive keys successfully
+    try testing.expectFmt(
+        "18df06843d13a08bf2a449844c5f8a478001bc4d4c627984d5a41da8d0402919",
+        "{s}",
+        .{fmt.fmtSliceHexLower(&client.master_secret.?)},
     );
 }
