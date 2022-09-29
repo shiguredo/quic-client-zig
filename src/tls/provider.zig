@@ -27,7 +27,7 @@ pub const State = enum {
     wait_cert_cr,
     wait_cert,
     wait_cv,
-    wait_finished,
+    wait_fin,
     connected,
 };
 
@@ -52,6 +52,14 @@ pub const Provider = struct {
     raw_ch: ?HandshakeRaw = null,
     /// server hello raw data
     raw_sh: ?HandshakeRaw = null,
+    /// encrypted extensions raw data
+    raw_ee: ?HandshakeRaw = null,
+    /// certificate raw data
+    raw_cert: ?HandshakeRaw = null,
+    /// certificate verify raw data
+    raw_cv: ?HandshakeRaw = null,
+    /// finished raw data
+    raw_fin: ?HandshakeRaw = null,
 
     allocator: mem.Allocator,
 
@@ -83,6 +91,10 @@ pub const Provider = struct {
     pub fn deinit(self: *Self) void {
         if (self.raw_ch) |h| h.deinit();
         if (self.raw_sh) |h| h.deinit();
+        if (self.raw_ee) |h| h.deinit();
+        if (self.raw_cert) |h| h.deinit();
+        if (self.raw_cv) |h| h.deinit();
+        if (self.raw_fin) |h| h.deinit();
     }
 
     /// derives initial secret from client's destination connection ID
@@ -237,7 +249,6 @@ pub const Provider = struct {
     pub fn handleStream(
         self: *Self,
         stream: *Stream,
-        epoch: tls.Epoch,
     ) !void {
         var buf = Buffer(BUF_SIZE).init();
         var reader = stream.reciever.reader();
@@ -246,8 +257,6 @@ pub const Provider = struct {
             if (buf.unreadLength() == 0) break;
             switch (self.state) {
                 .wait_sh => {
-                    if (epoch != .initial)
-                        return error.StateError;
                     handleRaw(&self.raw_sh, &buf, self.allocator) catch |err| {
                         if (err == error.DataTooShort) {
                             buf.realign();
@@ -256,16 +265,53 @@ pub const Provider = struct {
                     };
                     try self.handleServerHello();
                 },
-                .wait_ee => {},
+                .wait_ee => {
+                    handleRaw(&self.raw_ee, &buf, self.allocator) catch |err| {
+                        if (err == error.DataTooShort) {
+                            buf.realign();
+                            continue :read_loop;
+                        } else return err;
+                    };
+                    try self.handleEncryptedExtensions();
+                },
+                .wait_cert_cr => {
+                    handleRaw(&self.raw_cert, &buf, self.allocator) catch |err| {
+                        if (err == error.DataTooShort) {
+                            buf.realign();
+                            continue :read_loop;
+                        } else return err;
+                    };
+                    try self.handleCertificate();
+                },
+                .wait_cv => {
+                    handleRaw(&self.raw_cv, &buf, self.allocator) catch |err| {
+                        if (err == error.DataTooShort) {
+                            buf.realign();
+                            continue :read_loop;
+                        } else return err;
+                    };
+                    try self.handleCertificateVerify();
+                },
+                .wait_fin => {
+                    handleRaw(&self.raw_fin, &buf, self.allocator) catch |err| {
+                        if (err == error.DataTooShort) {
+                            buf.realign();
+                            continue :read_loop;
+                        } else return err;
+                    };
+                    try self.handleFinished();
+                },
                 else => unreachable,
             }
         }
     }
 
+    // private functions
+
     /// Reads bytes from self.raw_sh and handle it
     /// when self.raw_sh is not completed (its length is shorter
     /// than the length field indicates), does nothing
-    pub fn handleServerHello(
+    fn handleServerHello(
         self: *Self,
     ) !void {
         const raw_bytes =
@@ -288,12 +334,54 @@ pub const Provider = struct {
         self.state = .wait_ee;
     }
 
-    pub fn handleEncryptedExtensions(
+    fn handleEncryptedExtensions(
         self: *Self,
-    ) void {
-        _ = self;
+    ) !void {
+        const raw_bytes =
+            self.raw_ee orelse return;
+        if (!raw_bytes.isComplete())
+            return;
+
+        self.state = .wait_cert_cr;
     }
 
+    /// TODO: implement appropriate handling certificate
+    pub fn handleCertificate(
+        self: *Self,
+    ) !void {
+        const raw_bytes =
+            self.raw_cert orelse return;
+        if (!raw_bytes.isComplete())
+            return;
+
+        self.state = .wait_cv;
+    }
+
+    /// TODO: implement appropriate handling certificate verify
+    fn handleCertificateVerify(
+        self: *Self,
+    ) !void {
+        const raw_bytes =
+            self.raw_cv orelse return;
+        if (!raw_bytes.isComplete())
+            return;
+
+        self.state = .wait_fin;
+    }
+
+    fn handleFinished(
+        self: *Self,
+    ) !void {
+        const raw_bytes =
+            self.raw_fin orelse return;
+        if (!raw_bytes.isComplete())
+            return;
+
+        self.state = .connected;
+    }
+
+    /// if raw_ptr.* is null create instance and write data to it
+    /// else, write data to existing instance.
     fn handleRaw(
         raw_ptr: *?HandshakeRaw,
         buf_ptr: *Buffer(BUF_SIZE),
@@ -316,6 +404,8 @@ pub const Provider = struct {
                     allocator,
                     @intCast(usize, max_len),
                 );
+                const n = try raw.write(slice[0..std.math.min(max_len, slice.len)]);
+                buf_ptr.discard(n);
                 buf_ptr.realign();
                 break :blk raw;
             };
@@ -494,26 +584,164 @@ test "Key schedule" {
     );
 }
 
+fn allocParseHex(in: []const u8) ![]u8 {
+    const buf = try testing.allocator.alloc(u8, in.len);
+    return try fmt.hexToBytes(buf, in);
+}
+
+// simple 1-RTT Handshake from https://www.rfc-editor.org/rfc/rfc8448.html#section-3
 test "handleStream" {
     const allocator = testing.allocator;
-    var provider = Provider.init(allocator);
-    defer provider.deinit();
-    provider.x25519_keypair = try crypto.dh.X25519.KeyPair.create(null);
+    var client = Provider.init(allocator);
+    defer client.deinit();
+    client.x25519_keypair = try crypto.dh.X25519.KeyPair.create(null);
     var streams = CryptoStreams.init(allocator);
     defer streams.deinit();
 
-    const raw_sh =
-        "\x02\x00\x00\x56\x03\x03\xa6\xaf\x06\xa4\x12\x18\x60\xdc\x5e\x6e\x60\x24\x9c\xd3\x4c" ++
-        "\x95\x93\x0c\x8a\xc5\xcb\x14\x34\xda\xc1\x55\x77\x2e\xd3\xe2\x69\x28\x00\x13\x01\x00" ++
-        "\x00\x2e\x00\x33\x00\x24\x00\x1d\x00\x20\xc9\x82\x88\x76\x11\x20\x95\xfe\x66\x76\x2b" ++
-        "\xdb\xf7\xc6\x72\xe1\x56\xd6\xcc\x25\x3b\x83\x3d\xf1\xdd\x69\xb1\xb0\x4e\x75\x1f\x0f" ++
-        "\x00\x2b\x00\x02\x03\x04";
+    // 1. setup client hello
 
+    // 1-1. set client hello to client
+    const raw_ch_bytes =
+        "\x01\x00\x00\xc0\x03\x03\xcb\x34\xec\xb1\xe7\x81\x63\xba\x1c\x38\xc6\xda\xcb\x19\x6a" ++
+        "\x6d\xff\xa2\x1a\x8d\x99\x12\xec\x18\xa2\xef\x62\x83\x02\x4d\xec\xe7\x00\x00\x06\x13" ++
+        "\x01\x13\x03\x13\x02\x01\x00\x00\x91\x00\x00\x00\x0b\x00\x09\x00\x00\x06\x73\x65\x72" ++
+        "\x76\x65\x72\xff\x01\x00\x01\x00\x00\x0a\x00\x14\x00\x12\x00\x1d\x00\x17\x00\x18\x00" ++
+        "\x19\x01\x00\x01\x01\x01\x02\x01\x03\x01\x04\x00\x23\x00\x00\x00\x33\x00\x26\x00\x24" ++
+        "\x00\x1d\x00\x20\x99\x38\x1d\xe5\x60\xe4\xbd\x43\xd2\x3d\x8e\x43\x5a\x7d\xba\xfe\xb3" ++
+        "\xc0\x6e\x51\xc1\x3c\xae\x4d\x54\x13\x69\x1e\x52\x9a\xaf\x2c\x00\x2b\x00\x03\x02\x03" ++
+        "\x04\x00\x0d\x00\x20\x00\x1e\x04\x03\x05\x03\x06\x03\x02\x03\x08\x04\x08\x05\x08\x06" ++
+        "\x04\x01\x05\x01\x06\x01\x02\x01\x04\x02\x05\x02\x06\x02\x02\x02\x00\x2d\x00\x02\x01" ++
+        "\x01\x00\x1c\x00\x02\x40\x01";
+    client.raw_ch = HandshakeRaw.fromArrayList(data: {
+        var arr = std.ArrayList(u8).init(allocator);
+        try arr.appendSlice(raw_ch_bytes);
+        break :data arr;
+    });
+
+    // 1-2. set key share to client
+    client.x25519_keypair = .{
+        .public_key = "\x99\x38\x1d\xe5\x60\xe4\xbd\x43\xd2\x3d\x8e\x43\x5a\x7d\xba\xfe\xb3\xc0\x6e\x51\xc1\x3c\xae\x4d\x54\x13\x69\x1e\x52\x9a\xaf\x2c".*,
+        .secret_key = "\x49\xaf\x42\xba\x7f\x79\x94\x85\x2d\x71\x3e\xf2\x78\x4b\xcb\xca\xa7\x91\x1d\xe2\x6a\xdc\x56\x42\xcb\x63\x45\x40\xe7\xea\x50\x05".*,
+    };
+
+    // 1-3. set client.state .wait_sh
+    client.state = .wait_sh;
+
+    // 2. recieve server hello
+    const raw_sh_bytes =
+        "020000560303a6af06a4121860dc5e6e60249cd34c" ++
+        "95930c8ac5cb1434dac155772ed3e2692800130100" ++
+        "002e00330024001d0020c9828876112095fe66762b" ++
+        "dbf7c672e156d6cc253b833df1dd69b1b04e751f0f" ++
+        "002b00020304";
+
+    // 2-1. append server hello to stream
     var i_stream = streams.getPtr(.initial);
-    try i_stream.reciever.push(try allocator.dupe(u8, raw_sh), 0);
+    try i_stream.reciever.push(try allocParseHex(raw_sh_bytes), 0);
 
-    var ch = try provider.createClientHello(try packet.ConnectionId.init(0));
-    defer ch.deinit();
-    try provider.handleStream(i_stream, .initial);
-    try testing.expectEqualStrings(raw_sh, provider.raw_sh.?.data.items);
+    // 2-2. handle stream
+    try client.handleStream(i_stream);
+
+    // 2-3. test
+    try testing.expectEqual(raw_sh_bytes.len / 2, client.raw_sh.?.max_len);
+    try testing.expectFmt(
+        raw_sh_bytes,
+        "{s}",
+        .{fmt.fmtSliceHexLower(client.raw_sh.?.data.items)},
+    );
+    try testing.expectEqualSlices(
+        u8,
+        "\xc9\x82\x88\x76\x11\x20\x95\xfe\x66\x76\x2b\xdb\xf7\xc6\x72\xe1\x56\xd6\xcc\x25\x3b\x83\x3d\xf1\xdd\x69\xb1\xb0\x4e\x75\x1f\x0f",
+        &client.x25519_peer.?,
+    );
+
+    // 3. recieve encryted extensions, certificate, certificate verify, finished
+    const raw_ee_bytes =
+        "080000240022000a00140012001d0017" ++
+        "0018001901000101010201030104001c" ++
+        "0002400100000000";
+    const raw_cert_bytes =
+        "0b0001b9000001b50001b0308201ac30" ++
+        "820115a003020102020102300d06092a" ++
+        "864886f70d01010b0500300e310c300a" ++
+        "06035504031303727361301e170d3136" ++
+        "303733303031323335395a170d323630" ++
+        "3733303031323335395a300e310c300a" ++
+        "0603550403130372736130819f300d06" ++
+        "092a864886f70d010101050003818d00" ++
+        "30818902818100b4bb498f8279303d98" ++
+        "0836399b36c6988c0c68de55e1bdb826" ++
+        "d3901a2461eafd2de49a91d015abbc9a" ++
+        "95137ace6c1af19eaa6af98c7ced4312" ++
+        "0998e187a80ee0ccb0524b1b018c3e0b" ++
+        "63264d449a6d38e22a5fda4308467480" ++
+        "30530ef0461c8ca9d9efbfae8ea6d1d0" ++
+        "3e2bd193eff0ab9a8002c47428a6d35a" ++
+        "8d88d79f7f1e3f0203010001a31a3018" ++
+        "30090603551d1304023000300b060355" ++
+        "1d0f0404030205a0300d06092a864886" ++
+        "f70d01010b05000381810085aad2a0e5" ++
+        "b9276b908c65f73a7267170618a54c5f" ++
+        "8a7b337d2df7a594365417f2eae8f8a5" ++
+        "8c8f8172f9319cf36b7fd6c55b80f21a" ++
+        "03015156726096fd335e5e67f2dbf102" ++
+        "702e608ccae6bec1fc63a42a99be5c3e" ++
+        "b7107c3c54e9b9eb2bd5203b1c3b84e0" ++
+        "a8b2f759409ba3eac9d91d402dcc0cc8" ++
+        "f8961229ac9187b42b4de10000";
+    const raw_cv_bytes =
+        "0f000084080400805a747c5d88fa9bd2" ++
+        "e55ab085a61015b7211f824cd484145a" ++
+        "b3ff52f1fda8477b0b7abc90db78e2d3" ++
+        "3a5c141a078653fa6bef780c5ea248ee" ++
+        "aaa785c4f394cab6d30bbe8d4859ee51" ++
+        "1f602957b15411ac027671459e46445c" ++
+        "9ea58c181e818e95b8c3fb0bf3278409" ++
+        "d3be152a3da5043e063dda65cdf5aea2" ++
+        "0d53dfacd42f74f3";
+    const raw_fin_bytes =
+        "140000209b9b141d906337fbd2cbdce7" ++
+        "1df4deda4ab42c309572cb7fffee5454" ++
+        "b78f0718";
+
+    // 3-1. append these bytes to handshake stream
+    var h_stream = streams.getPtr(.handshake);
+    var offset: usize = 0;
+    try h_stream.reciever.push(try allocParseHex(raw_ee_bytes), offset);
+    offset += raw_ee_bytes.len / 2;
+    try h_stream.reciever.push(try allocParseHex(raw_cert_bytes), offset);
+    offset += raw_cert_bytes.len / 2;
+    try h_stream.reciever.push(try allocParseHex(raw_cv_bytes), offset);
+    offset += raw_cv_bytes.len / 2;
+    try h_stream.reciever.push(try allocParseHex(raw_fin_bytes), offset);
+    offset += raw_fin_bytes.len / 2;
+
+    // 3-2. handle stream
+    try client.handleStream(h_stream);
+
+    // 3-3. test
+    try testing.expectEqual(raw_ee_bytes.len / 2, client.raw_ee.?.max_len);
+    try testing.expectEqual(raw_cert_bytes.len / 2, client.raw_cert.?.max_len);
+    try testing.expectEqual(raw_cv_bytes.len / 2, client.raw_cv.?.max_len);
+    try testing.expectEqual(raw_fin_bytes.len / 2, client.raw_fin.?.max_len);
+    try testing.expectFmt(
+        raw_ee_bytes,
+        "{s}",
+        .{fmt.fmtSliceHexLower(client.raw_ee.?.data.items)},
+    );
+    try testing.expectFmt(
+        raw_cert_bytes,
+        "{s}",
+        .{fmt.fmtSliceHexLower(client.raw_cert.?.data.items)},
+    );
+    try testing.expectFmt(
+        raw_cv_bytes,
+        "{s}",
+        .{fmt.fmtSliceHexLower(client.raw_cv.?.data.items)},
+    );
+    try testing.expectFmt(
+        raw_fin_bytes,
+        "{s}",
+        .{fmt.fmtSliceHexLower(client.raw_fin.?.data.items)},
+    );
 }
