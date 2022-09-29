@@ -255,52 +255,30 @@ pub const Provider = struct {
         read_loop: while (true) {
             try buf.readFrom(reader);
             if (buf.unreadLength() == 0) break;
+
+            // write data to current state's handshakeRaw struct
+            var raw_hs_ptr = switch (self.state) {
+                .wait_sh => &self.raw_sh,
+                .wait_ee => &self.raw_ee,
+                .wait_cert_cr => &self.raw_cert,
+                .wait_cv => &self.raw_cv,
+                .wait_fin => &self.raw_fin,
+                else => unreachable,
+            };
+            handleRaw(raw_hs_ptr, &buf, self.allocator) catch |err| {
+                if (err == error.DataTooShort) {
+                    buf.realign();
+                    continue :read_loop;
+                } else return err;
+            };
+
+            // call current state's handling function
             switch (self.state) {
-                .wait_sh => {
-                    handleRaw(&self.raw_sh, &buf, self.allocator) catch |err| {
-                        if (err == error.DataTooShort) {
-                            buf.realign();
-                            continue :read_loop;
-                        } else return err;
-                    };
-                    try self.handleServerHello();
-                },
-                .wait_ee => {
-                    handleRaw(&self.raw_ee, &buf, self.allocator) catch |err| {
-                        if (err == error.DataTooShort) {
-                            buf.realign();
-                            continue :read_loop;
-                        } else return err;
-                    };
-                    try self.handleEncryptedExtensions();
-                },
-                .wait_cert_cr => {
-                    handleRaw(&self.raw_cert, &buf, self.allocator) catch |err| {
-                        if (err == error.DataTooShort) {
-                            buf.realign();
-                            continue :read_loop;
-                        } else return err;
-                    };
-                    try self.handleCertificate();
-                },
-                .wait_cv => {
-                    handleRaw(&self.raw_cv, &buf, self.allocator) catch |err| {
-                        if (err == error.DataTooShort) {
-                            buf.realign();
-                            continue :read_loop;
-                        } else return err;
-                    };
-                    try self.handleCertificateVerify();
-                },
-                .wait_fin => {
-                    handleRaw(&self.raw_fin, &buf, self.allocator) catch |err| {
-                        if (err == error.DataTooShort) {
-                            buf.realign();
-                            continue :read_loop;
-                        } else return err;
-                    };
-                    try self.handleFinished();
-                },
+                .wait_sh => try self.handleServerHello(),
+                .wait_ee => try self.handleEncryptedExtensions(),
+                .wait_cert_cr => try self.handleCertificate(),
+                .wait_cv => try self.handleCertificateVerify(),
+                .wait_fin => try self.handleFinished(),
                 else => unreachable,
             }
         }
