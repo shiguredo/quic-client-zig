@@ -77,6 +77,9 @@ pub const Provider = struct {
     handshake_secret: ?[Hmac.key_length]u8 = null,
     client_handshake: ?QuicKeys = null,
     server_handshake: ?QuicKeys = null,
+    master_secret: ?[Hmac.key_length]u8 = null,
+    client_master: ?QuicKeys = null,
+    server_master: ?QuicKeys = null,
 
     x25519_keypair: ?X25519.KeyPair = null,
     x25519_peer: ?[X25519.public_length]u8 = null,
@@ -93,8 +96,8 @@ pub const Provider = struct {
     raw_cert: ?HandshakeRaw = null,
     /// certificate verify raw data
     raw_cv: ?HandshakeRaw = null,
-    /// finished raw data
-    raw_fin: ?HandshakeRaw = null,
+    /// server finished raw data
+    raw_sfin: ?HandshakeRaw = null,
 
     allocator: mem.Allocator,
 
@@ -121,7 +124,7 @@ pub const Provider = struct {
         if (self.raw_ee) |h| h.deinit();
         if (self.raw_cert) |h| h.deinit();
         if (self.raw_cv) |h| h.deinit();
-        if (self.raw_fin) |h| h.deinit();
+        if (self.raw_sfin) |h| h.deinit();
     }
 
     /// returns ClientHello contained in Handshake union
@@ -200,7 +203,7 @@ pub const Provider = struct {
                 .wait_ee => &self.raw_ee,
                 .wait_cert_cr => &self.raw_cert,
                 .wait_cv => &self.raw_cv,
-                .wait_fin => &self.raw_fin,
+                .wait_fin => &self.raw_sfin,
                 else => unreachable,
             };
             handleRaw(raw_hs_ptr, &buf, self.allocator) catch |err| {
@@ -275,16 +278,45 @@ pub const Provider = struct {
         const hs_secret = Hkdf.extract(&early_derived, &ecdhe_input);
         self.handshake_secret = hs_secret;
 
-        if (self.raw_ch == null) return Error.MessageNotInstalled;
-        if (self.raw_sh == null) return Error.MessageNotInstalled;
+        if (self.raw_ch) |raw_ch| if (self.raw_sh) |raw_sh| {
+            const message = try mem.concat(allocator, u8, &[_][]const u8{
+                raw_ch.data.items,
+                raw_sh.data.items,
+            });
+            defer allocator.free(message);
+            self.client_handshake = QuicKeys.deriveClient(hs_secret, message);
+            self.server_handshake = QuicKeys.deriveServer(hs_secret, message);
+        } else return Error.MessageNotInstalled;
+    }
+
+    fn setUpMaster(self: *Self) !void {
+        const allocator = self.allocator;
+        const hs_secret = self.handshake_secret orelse return Error.KeyNotInstalled;
+        var hs_derived: [Sha256.digest_length]u8 = undefined;
+        q_crypto.deriveSecret(&hs_derived, hs_secret, "derived", "");
+
+        const extract_input = [_]u8{0} ** Hmac.key_length;
+        const master_secret = Hkdf.extract(&hs_derived, &extract_input);
+        self.master_secret = master_secret;
+
+        const raw_ch = self.raw_ch orelse return Error.KeyNotInstalled;
+        const raw_sh = self.raw_sh orelse return Error.KeyNotInstalled;
+        const raw_ee = self.raw_ee orelse return Error.KeyNotInstalled;
+        const raw_cert = self.raw_cert orelse return Error.KeyNotInstalled;
+        const raw_cv = self.raw_cv orelse return Error.KeyNotInstalled;
+        const raw_sfin = self.raw_sfin orelse return Error.KeyNotInstalled;
+
         const message = try mem.concat(allocator, u8, &[_][]const u8{
-            self.raw_ch.?.data.items,
-            self.raw_sh.?.data.items,
+            raw_ch.data.items,
+            raw_sh.data.items,
+            raw_ee.data.items,
+            raw_cert.data.items,
+            raw_cv.data.items,
+            raw_sfin.data.items,
         });
         defer allocator.free(message);
-
-        self.client_handshake = QuicKeys.deriveClient(hs_secret, message);
-        self.server_handshake = QuicKeys.deriveServer(hs_secret, message);
+        self.client_handshake = QuicKeys.deriveClient(master_secret, message);
+        self.server_handshake = QuicKeys.deriveServer(master_secret, message);
     }
 
     /// Reads bytes from self.raw_sh and handle it
@@ -326,8 +358,6 @@ pub const Provider = struct {
         if (!raw_bytes.isComplete())
             return;
 
-        // setup key
-
         self.state = .wait_cert_cr;
     }
 
@@ -359,9 +389,12 @@ pub const Provider = struct {
         self: *Self,
     ) !void {
         const raw_bytes =
-            self.raw_fin orelse return;
+            self.raw_sfin orelse return;
         if (!raw_bytes.isComplete())
             return;
+
+        // setup master keys
+        try self.setUpMaster();
 
         self.state = .connected;
     }
@@ -687,7 +720,7 @@ test "handleStream" {
         "9ea58c181e818e95b8c3fb0bf3278409" ++
         "d3be152a3da5043e063dda65cdf5aea2" ++
         "0d53dfacd42f74f3";
-    const raw_fin_bytes =
+    const raw_sfin_bytes =
         "140000209b9b141d906337fbd2cbdce7" ++
         "1df4deda4ab42c309572cb7fffee5454" ++
         "b78f0718";
@@ -701,8 +734,8 @@ test "handleStream" {
     offset += raw_cert_bytes.len / 2;
     try h_stream.reciever.push(try allocParseHex(raw_cv_bytes), offset);
     offset += raw_cv_bytes.len / 2;
-    try h_stream.reciever.push(try allocParseHex(raw_fin_bytes), offset);
-    offset += raw_fin_bytes.len / 2;
+    try h_stream.reciever.push(try allocParseHex(raw_sfin_bytes), offset);
+    offset += raw_sfin_bytes.len / 2;
 
     // 3-2. handle stream
     try client.handleStream(h_stream);
@@ -711,7 +744,7 @@ test "handleStream" {
     try testing.expectEqual(raw_ee_bytes.len / 2, client.raw_ee.?.max_len);
     try testing.expectEqual(raw_cert_bytes.len / 2, client.raw_cert.?.max_len);
     try testing.expectEqual(raw_cv_bytes.len / 2, client.raw_cv.?.max_len);
-    try testing.expectEqual(raw_fin_bytes.len / 2, client.raw_fin.?.max_len);
+    try testing.expectEqual(raw_sfin_bytes.len / 2, client.raw_sfin.?.max_len);
     try testing.expectFmt(
         raw_ee_bytes,
         "{s}",
@@ -728,8 +761,8 @@ test "handleStream" {
         .{fmt.fmtSliceHexLower(client.raw_cv.?.data.items)},
     );
     try testing.expectFmt(
-        raw_fin_bytes,
+        raw_sfin_bytes,
         "{s}",
-        .{fmt.fmtSliceHexLower(client.raw_fin.?.data.items)},
+        .{fmt.fmtSliceHexLower(client.raw_sfin.?.data.items)},
     );
 }
