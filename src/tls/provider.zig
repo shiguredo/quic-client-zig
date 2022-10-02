@@ -44,17 +44,31 @@ pub const QuicKeys = struct {
 
     const Self = @This();
 
-    /// derive keys for client
-    pub fn deriveClient(tls_secret: [Hmac.key_length]u8, message: []const u8) Self {
+    /// derive handshake traffic keys for client
+    pub fn deriveHandshakeClient(tls_secret: [Hmac.key_length]u8, message: []const u8) Self {
         var instance: Self = undefined;
         q_crypto.deriveSecret(&instance.secret, tls_secret, "c hs traffic", message);
         return instance;
     }
 
-    /// derive keys for server
-    pub fn deriveServer(tls_secret: [Hmac.key_length]u8, message: []const u8) Self {
+    /// derive handshake traffic keys for server
+    pub fn deriveHandshakeServer(tls_secret: [Hmac.key_length]u8, message: []const u8) Self {
         var instance: Self = undefined;
         q_crypto.deriveSecret(&instance.secret, tls_secret, "s hs traffic", message);
+        return instance;
+    }
+
+    /// derive handshake traffic keys for client
+    pub fn deriveApplicationClient(tls_secret: [Hmac.key_length]u8, message: []const u8) Self {
+        var instance: Self = undefined;
+        q_crypto.deriveSecret(&instance.secret, tls_secret, "c ap traffic", message);
+        return instance;
+    }
+
+    /// derive handshake traffic keys for server
+    pub fn deriveApplicationServer(tls_secret: [Hmac.key_length]u8, message: []const u8) Self {
+        var instance: Self = undefined;
+        q_crypto.deriveSecret(&instance.secret, tls_secret, "s ap traffic", message);
         return instance;
     }
 
@@ -191,6 +205,10 @@ pub const Provider = struct {
         self: *Self,
         stream: *Stream,
     ) !void {
+        if (self.state == .start) {
+            return;
+        }
+
         var buf = Buffer(BUF_SIZE).init();
         var reader = stream.reciever.reader();
         read_loop: while (true) {
@@ -219,7 +237,10 @@ pub const Provider = struct {
                 .wait_ee => try self.handleEncryptedExtensions(),
                 .wait_cert_cr => try self.handleCertificate(),
                 .wait_cv => try self.handleCertificateVerify(),
-                .wait_fin => try self.handleFinished(),
+                .wait_fin => {
+                    try self.handleFinished();
+                    try self.writeFinished(stream.sender.writer());
+                },
                 else => unreachable,
             }
         }
@@ -284,8 +305,8 @@ pub const Provider = struct {
                 raw_sh.data.items,
             });
             defer allocator.free(message);
-            self.client_handshake = QuicKeys.deriveClient(hs_secret, message);
-            self.server_handshake = QuicKeys.deriveServer(hs_secret, message);
+            self.client_handshake = QuicKeys.deriveHandshakeClient(hs_secret, message);
+            self.server_handshake = QuicKeys.deriveHandshakeServer(hs_secret, message);
         } else return Error.MessageNotInstalled;
     }
 
@@ -315,8 +336,8 @@ pub const Provider = struct {
             raw_sfin.data.items,
         });
         defer allocator.free(message);
-        self.client_handshake = QuicKeys.deriveClient(master_secret, message);
-        self.server_handshake = QuicKeys.deriveServer(master_secret, message);
+        self.client_master = QuicKeys.deriveApplicationClient(master_secret, message);
+        self.server_master = QuicKeys.deriveApplicationServer(master_secret, message);
     }
 
     /// Reads bytes from self.raw_sh and handle it
@@ -398,6 +419,48 @@ pub const Provider = struct {
         try self.setUpMaster();
 
         self.state = .connected;
+    }
+
+    fn writeFinished(self: *Self, writer: anytype) !void {
+        const raw_ch = self.raw_ch orelse return Error.MessageNotInstalled;
+        const raw_sh = self.raw_sh orelse return Error.MessageNotInstalled;
+        const raw_ee = self.raw_ee orelse return Error.MessageNotInstalled;
+        const raw_cert = self.raw_cert orelse return Error.MessageNotInstalled;
+        const raw_cv = self.raw_cv orelse return Error.MessageNotInstalled;
+        const raw_sfin = self.raw_sfin orelse return Error.MessageNotInstalled;
+
+        const messages = try mem.concat(
+            self.allocator,
+            u8,
+            &[_][]const u8{
+                raw_ch.data.items,
+                raw_sh.data.items,
+                raw_ee.data.items,
+                raw_cert.data.items,
+                raw_cv.data.items,
+                raw_sfin.data.items,
+            },
+        );
+        defer self.allocator.free(messages);
+
+        const base_key =
+            (self.client_handshake orelse return Error.KeyNotInstalled).secret;
+        const finished_key = fkey: {
+            var temp: [Sha256.digest_length]u8 = undefined;
+            q_crypto.hkdfExpandLabel(&temp, base_key, "finished", "");
+            break :fkey temp;
+        };
+
+        var buf: [4 + Hmac.mac_length]u8 = undefined; // message header length + verify data length
+        buf[0..4].* = .{ 0x14, 0x00, 0x00, 0x20 };
+        const hash = h: {
+            var temp: [Sha256.digest_length]u8 = undefined;
+            Sha256.hash(messages, &temp, .{});
+            break :h temp;
+        };
+        Hmac.create(buf[4..], &hash, &finished_key);
+
+        try writer.writeAll(&buf);
     }
 
     /// if raw_ptr.* is null create instance and write data to it
@@ -686,15 +749,29 @@ test "handleStream" {
     );
 
     // 2-3-2. check derive keys successfully
+    // early secret
     try testing.expectFmt(
         "33ad0a1c607ec03b09e6cd9893680ce210adf300aa1f2660e1b22e10f170f92a",
         "{s}",
         .{fmt.fmtSliceHexLower(&client.early_secret.?)},
     );
+    // handshake secret
     try testing.expectFmt(
         "1dc826e93606aa6fdc0aadc12f741b01046aa6b99f691ed221a9f0ca043fbeac",
         "{s}",
         .{fmt.fmtSliceHexLower(&client.handshake_secret.?)},
+    );
+    // client handshake traffic secret
+    try testing.expectFmt(
+        "b3eddb126e067f35a780b3abf45e2d8f3b1a950738f52e9600746a0e27a55a21",
+        "{s}",
+        .{fmt.fmtSliceHexLower(&client.client_handshake.?.secret)},
+    );
+    // server handshake traffic secret
+    try testing.expectFmt(
+        "b67b7d690cc16c4e75e54213cb2d37b4e9c912bcded9105d42befd59d391ad38",
+        "{s}",
+        .{fmt.fmtSliceHexLower(&client.server_handshake.?.secret)},
     );
 
     // 3. recieve encryted extensions, certificate, certificate verify, finished
@@ -789,9 +866,31 @@ test "handleStream" {
     );
 
     // 3-3-2. check derive keys successfully
+    // Master Secret
     try testing.expectFmt(
         "18df06843d13a08bf2a449844c5f8a478001bc4d4c627984d5a41da8d0402919",
         "{s}",
         .{fmt.fmtSliceHexLower(&client.master_secret.?)},
+    );
+    // client application traffic secret
+    try testing.expectFmt(
+        "9e40646ce79a7f9dc05af8889bce6552875afa0b06df0087f792ebb7c17504a5",
+        "{s}",
+        .{fmt.fmtSliceHexLower(&client.client_master.?.secret)},
+    );
+    // server application traffic secret
+    try testing.expectFmt(
+        "a11af9f05531f856ad47116b45a950328204b4f44bfb6b3a4b4f1f3fcb631643",
+        "{s}",
+        .{fmt.fmtSliceHexLower(&client.server_master.?.secret)},
+    );
+
+    // 3-3-3. derive finished successfully
+    var buf = try h_stream.sender.emit(10000, allocator);
+    defer buf.?.deinit(allocator);
+    try testing.expectFmt(
+        "14000020a8ec436d677634ae525ac1fcebe11a039ec17694fac6e98527b642f2edd5ce61",
+        "{s}",
+        .{fmt.fmtSliceHexLower(buf.?.buf)},
     );
 }
