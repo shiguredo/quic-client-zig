@@ -73,10 +73,6 @@ pub const RecvStream = struct {
     const Self = @This();
     const Queue = std.PriorityQueue(RangeBuf, void, rangePriorTo);
 
-    pub const Error = error{
-        DataRangeAlreadyIncluded,
-    };
-
     /// compareFn for PriorityQueue
     fn rangePriorTo(context: void, a: RangeBuf, b: RangeBuf) math.Order {
         _ = context;
@@ -113,7 +109,7 @@ pub const RecvStream = struct {
         self: *Self,
         buf: []const u8,
         offset: usize,
-    ) (Error || mem.Allocator.Error)!void {
+    ) mem.Allocator.Error!void {
         const r_buf = RangeBuf.fromSlice(buf, offset);
         try self.pushRangeBuf(r_buf);
     }
@@ -186,10 +182,6 @@ test "RecvStream -- push and read" {
     try rs.pushRangeBuf(b1);
     try rs.pushRangeBuf(b2);
     try rs.pushRangeBuf(b3);
-    try testing.expectError(
-        error.DataRangeAlreadyIncluded,
-        rs.pushRangeBuf(b3),
-    );
 
     var read_buf = [_]u8{0} ** 256;
     var count = try rs.read(&read_buf);
