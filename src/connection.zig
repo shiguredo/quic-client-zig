@@ -179,6 +179,10 @@ pub const QuicSocket = struct {
         const space_enum = packet_type.toSpace();
         var space = self.spaces.s.getPtr(space_enum);
 
+        // if payload length is shorter than 20, encryptPacket will fail, so add padding.
+        // TODO: remove this padding
+        try pkt.payload.append(.{ .padding = .{ .length = 20 }});
+
         _ = space;
         try self.pkt_buf.append(pkt);
         return;

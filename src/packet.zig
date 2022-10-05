@@ -33,7 +33,7 @@ pub const PacketTypes = enum {
             .initial => .initial,
             .handshake => .handshake,
             .zero_rtt, .one_rtt => .application,
-            else => unreachable // TODO: error handling for no packet number space
+            else => unreachable, // TODO: error handling for no packet number space
         };
     }
 };
@@ -183,16 +183,20 @@ pub const LongHeaderPacket = struct {
         try rem_length.encode(h_writer);
         try h_writer.writeAll(pn_array[pn_array.len - self.decodePnLength() ..]);
 
-        const client_initial = tls_provider.client_initial.?;
+        const keys = switch (packet_type) {
+            .initial => tls_provider.client_initial orelse return tls.Provider.Error.KeyNotInstalled,
+            .handshake => tls_provider.client_handshake orelse return tls.Provider.Error.KeyNotInstalled,
+            else => unreachable,
+        };
 
         // encrypt
         const encrypted_bytes = try q_crypto.encryptPacket(
             aes_gcm.Aes128Gcm,
             header.items,
             plain_text.items,
-            client_initial.key,
-            client_initial.iv,
-            client_initial.hp,
+            keys.key,
+            keys.iv,
+            keys.hp,
             allocator,
         );
         defer encrypted_bytes.deinit();
