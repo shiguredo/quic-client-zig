@@ -121,10 +121,10 @@ pub const RecvStream = struct {
     pub fn pushRangeBuf(
         self: *Self,
         r_buf: RangeBuf,
-    ) (Error || mem.Allocator.Error)!void {
+    ) mem.Allocator.Error!void {
         const buf_range = r_buf.range();
         if (self.data_ranges.include(buf_range)) {
-            return Error.DataRangeAlreadyIncluded;
+            return;
         }
 
         try self.data.add(r_buf);
