@@ -2,7 +2,8 @@ const std = @import("std");
 const mem = std.mem;
 const util = @import("util.zig");
 const tls = @import("tls.zig");
-
+const RangeBuf = @import("stream.zig").RangeBuf;
+const Stream = @import("stream.zig").Stream;
 const VariableLengthInt = util.VariableLengthInt;
 
 pub const FrameTypes = enum {
@@ -146,21 +147,37 @@ pub const AckFrame = struct {
 
 pub const CryptoFrame = struct { // type_id: 0x06
     offset: VariableLengthInt,
-    data: std.ArrayList(u8),
+    data: []const u8,
+    allocator: mem.Allocator,
 
     const Self = @This();
 
+    /// takes RangeBuf's ownership
+    pub fn fromRangeBuf(b: RangeBuf, allocator: mem.Allocator) !Self {
+        return .{
+            .offset = try VariableLengthInt.fromInt(b.offset),
+            .data = b.buf,
+            .allocator = allocator,
+        };
+    }
+
+    pub fn fromStream(s: *Stream, max_len: usize, allocator: mem.Allocator) ?Self {
+        const b =
+            try s.sender.emit(max_len, allocator) orelse return null;
+        return try Self.fromRangeBuf(b, allocator);
+    }
+
     pub fn deinit(self: Self) void {
-        self.data.deinit();
+        self.allocator.free(self.data);
     }
 
     pub fn encode(self: Self, writer: anytype) (@TypeOf(writer).Error || VariableLengthInt.Error)!void {
         const frame_type = try VariableLengthInt.fromInt(0x06);
         try frame_type.encode(writer);
         try self.offset.encode(writer);
-        const length = try VariableLengthInt.fromInt(self.data.items.len);
+        const length = try VariableLengthInt.fromInt(self.data.len);
         try length.encode(writer);
-        try writer.writeAll(self.data.items);
+        try writer.writeAll(self.data);
     }
 
     pub fn decodeAfterType(reader: anytype, allocator: mem.Allocator) !Self {
@@ -168,12 +185,14 @@ pub const CryptoFrame = struct { // type_id: 0x06
         const length = try VariableLengthInt.decode(reader);
         const data = data: {
             var buf = try allocator.alloc(u8, @intCast(usize, length.value));
+            errdefer allocator.free(buf);
             try reader.readNoEof(buf);
-            break :data std.ArrayList(u8).fromOwnedSlice(allocator, buf);
+            break :data buf;
         };
         return Self{
             .offset = offset,
             .data = data,
+            .allocator = allocator,
         };
     }
 };
