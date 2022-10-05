@@ -12,13 +12,21 @@ const util = @import("util.zig");
 const stream = @import("stream.zig");
 const Buffer = @import("buffer.zig").Buffer;
 const RangeSet = @import("range_set.zig").RangeSet;
+const Spaces = @import("number_space.zig").Spaces;
 
 pub const QuicConfig = struct {};
 
 const MAX_CID_LENGTH = 255;
+const RBUF_MAX_LEN = 4096;
 pub const ConnectionId = std.BoundedArray(u8, MAX_CID_LENGTH);
 
+const ConnectionState = enum {
+    first_flight,
+    connected,
+};
+
 pub const QuicSocket = struct {
+    state: ConnectionState = .first_flight,
     tls_provider: tls.Provider,
     dg_socket: udp.DatagramSocket,
     c_streams: stream.CryptoStreams,
@@ -26,6 +34,10 @@ pub const QuicSocket = struct {
 
     dcid: ConnectionId,
     scid: ConnectionId,
+
+    spaces: Spaces,
+
+    pkt_buf: std.ArrayList(packet.LongHeaderPacket),
 
     allocator: mem.Allocator,
 
@@ -43,13 +55,15 @@ pub const QuicSocket = struct {
             break :dcid id;
         };
 
-        return .{
-            .tls_provider = try tls.Provider.init(allocator, dcid.constSlice()),
+        return Self{
+            .tls_provider = try tls.Provider.init(allocator),
             .dg_socket = udp_sock,
             .c_streams = stream.CryptoStreams.init(allocator),
             .ack_ranges = RangeSet.init(allocator),
             .dcid = dcid,
             .scid = scid,
+            .spaces = Spaces.init(allocator),
+            .pkt_buf = std.ArrayList(packet.LongHeaderPacket).init(allocator),
             .allocator = allocator,
         };
     }
@@ -57,45 +71,22 @@ pub const QuicSocket = struct {
     pub fn close(self: *Self) void {
         self.tls_provider.deinit();
         self.dg_socket.close();
+        self.c_streams.deinit();
+        self.spaces.deinit();
+        self.pkt_buf.deinit();
     }
 
     /// Start handshake
-    pub fn connnect(self: *Self) !void {
-        var c_hello_frame = ch: {
-            var c_hello = try self.tls_provider.createClientHello(self.scid);
-            defer c_hello.deinit();
-            var ch_frame = frame.CryptoFrame{
-                .offset = try util.VariableLengthInt.fromInt(0),
-                .data = data: {
-                    var data = std.ArrayList(u8).init(self.allocator);
-                    try c_hello.encode(data.writer());
-                    break :data data;
-                },
-            };
-            break :ch ch_frame;
-        };
-
-        var c_initial = packet.LongHeaderPacket{
-            .flags = packet.LongHeaderFlags.initial(1),
-            .dst_cid = self.dcid,
-            .src_cid = self.scid,
-            .token = std.ArrayList(u8).init(self.allocator),
-            .packet_number = 0x00,
-            .payload = p: {
-                var frames = std.ArrayList(frame.Frame).init(self.allocator);
-                try frames.append(.{ .crypto = c_hello_frame });
-                break :p frames;
-            },
-        };
-        defer c_initial.deinit();
-
-        var w_buf = Buffer(4096).init();
-        try c_initial.encodeEncrypted(
-            w_buf.writer(),
-            self.allocator,
-            self.tls_provider,
+    pub fn connect(self: *Self) !void {
+        var initial_stream = self.c_streams.getPtr(.initial);
+        try self.tls_provider.initiateHandshake(
+            initial_stream,
+            self.dcid,
+            self.scid,
         );
-        _ = try self.dg_socket.write(w_buf.getUnreadSlice());
+
+        try self.buildPacket(.initial);
+        try self.transmit();
     }
 
     pub fn isConnected(self: Self) bool {
@@ -103,8 +94,6 @@ pub const QuicSocket = struct {
         _ = self;
         return false;
     }
-
-    // prvate functions below
 
     /// recieve data from udp socket and handle it.
     pub fn recv(self: *Self, buf: []const u8) !void {
@@ -119,14 +108,30 @@ pub const QuicSocket = struct {
         } else |err| {
             if (err != error.EndOfStream) return err;
         }
+        try self.transmit();
     }
 
-    /// transmit data if needed (TODO: implementation)
+    // prvate functions below
+
+    /// transmit data if needed
     fn transmit(self: *Self) !void {
-        _ = self;
+        var buf = Buffer(RBUF_MAX_LEN).init();
+        for (self.pkt_buf.items) |*pkt| {
+            try pkt.encodeEncrypted(
+                buf.writer(),
+                self.allocator,
+                self.tls_provider,
+            );
+            pkt.deinit();
+        }
+        self.pkt_buf.clearRetainingCapacity();
+        _ = try self.dg_socket.write(buf.getUnreadSlice());
     }
 
     fn handlePacket(self: *Self, pkt: packet.LongHeaderPacket) !void {
+        if (self.state == .first_flight) {
+            self.dcid = pkt.src_cid;
+        }
         const epoch = pkt.flags.packet_type.toEpoch();
         for (pkt.payload.items) |frm| {
             switch (frm) {
@@ -141,16 +146,86 @@ pub const QuicSocket = struct {
             }
         }
         try self.ack_ranges.addOne(@intCast(u64, pkt.packet_number));
-        try self.transmit();
     }
 
     fn handleCryptoFrame(self: *Self, c_frame: frame.CryptoFrame, epoch: tls.Epoch) !void {
         var cs = self.c_streams.getPtr(epoch);
         try cs.reciever.push(
-            c_frame.data.items,
+            c_frame.data,
             @intCast(usize, c_frame.offset.value),
         );
         try self.tls_provider.handleStream(cs);
+        if (epoch == .handshake) {
+            try self.buildPacket(.handshake);
+        }
+    }
+
+    /// build packet and push it queue if needed.
+    fn buildPacket(self: *Self, packet_type: packet.PacketTypes) !void {
+        var pkt = switch (packet_type) {
+            .initial => try self.buildInitial(),
+            .handshake => try self.buildHandshake(),
+            else => return error.Unimplemented,
+        };
+
+        // append crypto frame
+        switch (packet_type) {
+            .initial, .handshake => try self.addCryptoFrames(&pkt),
+            else => {},
+        }
+
+        // append ack frame
+        // TODO: append ack frame
+        const space_enum = packet_type.toSpace();
+        var space = self.spaces.s.getPtr(space_enum);
+
+        _ = space;
+        try self.pkt_buf.append(pkt);
+        return;
+    }
+
+    fn buildInitial(self: *Self) !packet.LongHeaderPacket {
+        var number_space = self.spaces.s.getPtr(.initial);
+        const flags = packet.LongHeaderFlags{
+            .pn_length = 0b11,
+            .packet_type = .initial,
+        };
+        return .{
+            .flags = flags,
+            .dst_cid = self.dcid,
+            .src_cid = self.scid,
+            .token = std.ArrayList(u8).init(self.allocator),
+            .packet_number = @intCast(u32, number_space.generate()),
+            .payload = std.ArrayList(frame.Frame).init(self.allocator),
+        };
+    }
+
+    fn buildHandshake(self: *Self) !packet.LongHeaderPacket {
+        var number_space = self.spaces.s.getPtr(.handshake);
+        const flags = packet.LongHeaderFlags{
+            .pn_length = 0b11,
+            .packet_type = .handshake,
+        };
+        return .{
+            .flags = flags,
+            .dst_cid = self.dcid,
+            .src_cid = self.scid,
+            .token = null,
+            .packet_number = @intCast(u32, number_space.generate()),
+            .payload = std.ArrayList(frame.Frame).init(self.allocator),
+        };
+    }
+
+    /// add crypto frame to given packet
+    /// packet type is must be initial or handshake
+    fn addCryptoFrames(self: *Self, pkt: *packet.LongHeaderPacket) !void {
+        const epoch = pkt.flags.packet_type.toEpoch();
+        var s = self.c_streams.getPtr(epoch);
+
+        while (try s.sender.emit(RBUF_MAX_LEN, self.allocator)) |rbuf| {
+            var c = try frame.CryptoFrame.fromRangeBuf(rbuf, self.allocator);
+            try pkt.payload.append(.{ .crypto = c });
+        }
     }
 };
 
@@ -163,6 +238,7 @@ test "connect()" {
         udp_sock,
         testing.allocator,
     );
+    try conn.connect();
 
     var buf = [_]u8{0} ** 4096;
     while (true) {
@@ -171,5 +247,4 @@ test "connect()" {
         try conn.recv(buf[0..n]);
     }
     defer conn.close();
-    try conn.connnect();
 }

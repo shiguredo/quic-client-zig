@@ -215,12 +215,12 @@ test "encryptInitialPacket" {
 
     const payload_len_with_padding = 1162;
     const payload = payload_array[0..payload_len_with_padding];
-    var tls_provider = try tls.Provider.init(
-        testing.allocator,
-        &[_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 },
-    );
 
-    const client_initial = tls_provider.client_initial.?;
+    const client_initial = tls.QuicKeys{
+        .key = "\x1f\x36\x96\x13\xdd\x76\xd5\x46\x77\x30\xef\xcb\xe3\xb1\xa2\x2d".*,
+        .iv = "\xfa\x04\x4b\x2f\x42\xa3\xfd\x3b\x46\xfb\x25\x5c".*,
+        .hp = "\x9f\x50\x44\x9e\x04\xa0\xe8\x10\x28\x3a\x1e\x99\x33\xad\xed\xd2".*,
+    };
 
     const encrypted = try encryptInitialPacket(
         Aes128Gcm,
@@ -359,12 +359,11 @@ test "decryptInitialPacket" {
     );
     // zig fmt: on
 
-    var tls_provider = try tls.Provider.init(
-        testing.allocator,
-        &[_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 },
-    );
-
-    const initial_keys = tls_provider.server_initial.?;
+    const initial_keys = tls.QuicKeys{
+        .key = "\xcf\x3a\x53\x31\x65\x3c\x36\x4c\x88\xf0\xf3\x79\xb6\x06\x7e\x37".*,
+        .iv = "\x0a\xc1\x49\x3c\xa1\x90\x58\x53\xb0\xbb\xa0\x3e".*,
+        .hp = "\xc2\x06\xb8\xd9\xb9\xf0\xf3\x76\x44\x43\x0b\x49\x0e\xea\xa3\x14".*,
+    };
 
     var decrypted = try decryptInitialPacket(
         Aes128Gcm,

@@ -9,12 +9,33 @@ const util = @import("util.zig");
 const frame = @import("frame.zig");
 const tls = @import("tls.zig");
 const q_crypto = @import("crypto.zig");
-
+const Stream = @import("stream.zig").Stream;
 const VariableLengthInt = util.VariableLengthInt;
+const SpacesEnum = @import("number_space.zig").SpacesEnum;
 
 const HeaderForm = enum(u1) {
     short = 0b0,
     long = 0b1,
+};
+
+pub const PacketTypes = enum {
+    initial,
+    zero_rtt,
+    handshake,
+    retry,
+    version_nego,
+    one_rtt,
+
+    const Self = @This();
+
+    pub fn toSpace(self: Self) SpacesEnum {
+        return switch (self) {
+            .initial => .initial,
+            .handshake => .handshake,
+            .zero_rtt, .one_rtt => .application,
+            else => unreachable // TODO: error handling for no packet number space
+        };
+    }
 };
 
 pub const LongHeaderPacketTypes = enum(u2) {
@@ -79,6 +100,7 @@ const ConnectionId = connection.ConnectionId;
 
 pub const QUIC_VERSION_1 = 0x00000001;
 
+/// TODO: support 1-RTT packet and rename LongHeaderPacket -> Packet
 pub const LongHeaderPacket = struct {
     flags: LongHeaderFlags,
 
@@ -282,7 +304,7 @@ pub const LongHeaderPacket = struct {
     }
 
     /// get payload encoded length without padding field
-    pub fn payloadByteLength(self: *const Self) usize {
+    fn payloadByteLength(self: *const Self) usize {
         var len: usize = 0;
         for (self.payload.items) |*frame_item| {
             len += frame_item.getEncLen();
@@ -296,12 +318,12 @@ pub const LongHeaderPacket = struct {
     }
 
     /// decode packet number length to usize
-    pub fn decodePnLength(self: *const Self) usize {
+    fn decodePnLength(self: *const Self) usize {
         return @intCast(usize, self.flags.pn_length) + 1;
     }
 
     /// return token length in VariableLengthInt struct
-    pub fn tokenLengthVlInt(
+    fn tokenLengthVlInt(
         self: *const Self,
     ) VariableLengthInt.Error!?VariableLengthInt {
         return if (self.token) |token|
@@ -311,7 +333,7 @@ pub const LongHeaderPacket = struct {
     }
 
     /// return (header without "length" field length) + (not padded payload length)
-    pub fn headerLengthWithoutLengthField(self: *const Self) !usize {
+    fn headerLengthWithoutLengthField(self: *const Self) !usize {
         var ret: usize = 0;
         ret += 7; // first byte + version field + dcid len field + scid len field
         ret += self.dst_cid.len;
@@ -341,8 +363,17 @@ test "decode initial packet" {
     );
     // zig fmt: on
     var stream = std.io.fixedBufferStream(&server_initial);
-    var tls_provider = try tls.Provider.init(testing.allocator, "\x76\x49\x73\x32\xb6\x4c\x00\x9c");
-    const initial_packet = try LongHeaderPacket.decodeEncrypted(stream.reader(), testing.allocator, tls_provider);
+    var tls_provider = try tls.Provider.init(testing.allocator);
+    defer tls_provider.deinit();
+
+    var dummy_stream = Stream.init(testing.allocator);
+    defer dummy_stream.deinit();
+
+    var c_dcid = try connection.ConnectionId.fromSlice("\x76\x49\x73\x32\xb6\x4c\x00\x9c");
+    var c_scid = try connection.ConnectionId.fromSlice("\x00");
+    try tls_provider.initiateHandshake(&dummy_stream, c_dcid, c_scid);
+
+    var initial_packet = try LongHeaderPacket.decodeEncrypted(stream.reader(), testing.allocator, tls_provider);
     defer initial_packet.deinit();
 
     try testing.expectEqual(@as(u2, 0b01), initial_packet.flags.pn_length);
@@ -369,7 +400,7 @@ test "decode initial packet" {
         "67904904c60a00130100002e002b0002" ++ "030400330024001d0020416e6d420521" ++
         "e12d8592c00d334c16749542222edd7f" ++ "62accc1cb16b5f3fb300",
         "{x}",
-        .{std.fmt.fmtSliceHexLower(initial_packet.payload.items[1].crypto.data.items)},
+        .{std.fmt.fmtSliceHexLower(initial_packet.payload.items[1].crypto.data)},
     );
     // zig fmt: on
 }
