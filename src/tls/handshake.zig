@@ -228,19 +228,14 @@ test "decode server hello" {
         @as(HandshakeType, s_hello),
     );
 
-    switch (s_hello) {
-        .server_hello => |s_hello| {
-            try testing.expectFmt(
-                "4e1f7043fa33e9d7d35ee9d31701bd8a" ++ "4650aa79b40dc7c1a8aa4a35fa0a244a",
-                "{x}",
-                .{std.fmt.fmtSliceHexLower(&s_hello.random_bytes)},
-            );
-            try testing.expectEqualSlices(
-                u8,
-                &[_]u8{ 0x13, 0x01 },
-                &s_hello.cipher_suite,
-            );
-        },
-        else => unreachable,
-    }
+    try testing.expectFmt(
+        "4e1f7043fa33e9d7d35ee9d31701bd8a" ++ "4650aa79b40dc7c1a8aa4a35fa0a244a",
+        "{x}",
+        .{std.fmt.fmtSliceHexLower(&s_hello.server_hello.random_bytes)},
+    );
+    try testing.expectEqualSlices(
+        u8,
+        &[_]u8{ 0x13, 0x01 },
+        &s_hello.server_hello.cipher_suite,
+    );
 }
