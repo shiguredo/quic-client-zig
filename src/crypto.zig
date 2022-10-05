@@ -138,7 +138,7 @@ pub const HP_KEY_LENGTH = 16;
 /// given header and payload, return encrypted packet array list
 /// header is from first byte to packet number field,
 /// payload is remainder (does not include packet number field)
-pub fn encryptInitialPacket(
+pub fn encryptPacket(
     comptime AesGcm: type,
     header: []const u8,
     payload: []const u8,
@@ -191,7 +191,7 @@ pub fn encryptInitialPacket(
     return encrypted_packet;
 }
 
-test "encryptInitialPacket" {
+test "encryptPacket" {
     // test vectors from https://www.rfc-editor.org/rfc/rfc9001#name-sample-packet-protection
     var header_array = [_]u8{0} ** 256;
     const header = try std.fmt.hexToBytes(
@@ -222,7 +222,7 @@ test "encryptInitialPacket" {
         .hp = "\x9f\x50\x44\x9e\x04\xa0\xe8\x10\x28\x3a\x1e\x99\x33\xad\xed\xd2".*,
     };
 
-    const encrypted = try encryptInitialPacket(
+    const encrypted = try encryptPacket(
         Aes128Gcm,
         header,
         payload,
@@ -282,7 +282,7 @@ test "encryptInitialPacket" {
 /// takes encrypted header and payload, returns decrypted packet array list
 /// header is from first byte to "length" field,
 /// payload is remainder (includes packet number)
-pub fn decryptInitialPacket(
+pub fn decryptPacket(
     comptime AesGcm: type,
     header: []const u8,
     payload: []const u8,
@@ -343,7 +343,7 @@ pub fn decryptInitialPacket(
     return decrypted_res;
 }
 
-test "decryptInitialPacket" {
+test "decryptPacket" {
     // test vectors from https://www.rfc-editor.org/rfc/rfc9001#name-server-initial
     var header = [_]u8{0} ** 18;
     _ = try std.fmt.hexToBytes(&header, "cf000000010008f067a5502a4262b5004075");
@@ -365,7 +365,7 @@ test "decryptInitialPacket" {
         .hp = "\xc2\x06\xb8\xd9\xb9\xf0\xf3\x76\x44\x43\x0b\x49\x0e\xea\xa3\x14".*,
     };
 
-    var decrypted = try decryptInitialPacket(
+    var decrypted = try decryptPacket(
         Aes128Gcm,
         &header,
         &payload,

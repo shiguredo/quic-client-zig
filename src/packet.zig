@@ -186,7 +186,7 @@ pub const LongHeaderPacket = struct {
         const client_initial = tls_provider.client_initial.?;
 
         // encrypt
-        const encrypted_bytes = try q_crypto.encryptInitialPacket(
+        const encrypted_bytes = try q_crypto.encryptPacket(
             aes_gcm.Aes128Gcm,
             header.items,
             plain_text.items,
@@ -257,7 +257,7 @@ pub const LongHeaderPacket = struct {
             else => unreachable,
         };
 
-        const decrypted_packet = try q_crypto.decryptInitialPacket(
+        const decrypted_packet = try q_crypto.decryptPacket(
             aes_gcm.Aes128Gcm,
             header_bytes,
             encrypted_payload,
