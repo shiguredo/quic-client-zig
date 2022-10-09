@@ -36,15 +36,6 @@ pub const PacketTypes = enum {
             else => unreachable, // TODO: error handling for no packet number space
         };
     }
-};
-
-pub const LongHeaderPacketTypes = enum(u2) {
-    initial = 0x00,
-    zero_rtt = 0x01,
-    handshake = 0x02,
-    retry = 0x03,
-
-    const Self = @This();
 
     pub fn toEpoch(self: Self) tls.Epoch {
         return switch (self) {
@@ -54,6 +45,13 @@ pub const LongHeaderPacketTypes = enum(u2) {
             else => .no_crypto,
         };
     }
+};
+
+pub const LongHeaderPacketTypes = enum(u2) {
+    initial = 0x00,
+    zero_rtt = 0x01,
+    handshake = 0x02,
+    retry = 0x03,
 };
 
 pub const LongHeaderFlags = packed struct {
@@ -95,6 +93,72 @@ pub const LongHeaderFlags = packed struct {
     }
 };
 
+pub const ShortHeaderFlags = packed struct {
+    pn_length: u2,
+    key_phase: u1,
+    reserved: u2,
+    spin: u1,
+    fixed: u1 = 0b1,
+    header_form: HeaderForm = .short,
+
+    const Self = @This();
+
+    pub fn toU8(self: Self) u8 {
+        return @bitCast(u8, self);
+    }
+
+    pub fn fromU8(byte: u8) Self {
+        return @bitCast(Self, byte);
+    }
+};
+
+pub const Flags = union(HeaderForm) {
+    short: ShortHeaderFlags,
+    long: LongHeaderFlags,
+
+    const Self = @This();
+
+    pub fn toU8(self: Self) u8 {
+        return switch (self) {
+            .short => |s| s.toU8(),
+            .long => |l| l.toU8(),
+        };
+    }
+
+    pub fn fromU8(byte: u8) Self {
+        const form_bit = byte & 0x80;
+        if (form_bit == 0) {
+            return .{ .short = ShortHeaderFlags.fromU8(byte) };
+        } else {
+            return .{ .long = LongHeaderFlags.fromU8(byte) };
+        }
+    }
+
+    pub fn packetType(self: Self) PacketTypes {
+        if (@as(HeaderForm, self) == .short) {
+            return .one_rtt;
+        } else {
+            return switch (self.long.packet_type) {
+                .initial => .initial,
+                .handshake => .handshake,
+                .zero_rtt => .zero_rtt,
+                .retry => .retry,
+            };
+        }
+    }
+
+    pub fn rawPnLength(self: Self) u2 {
+        return switch (self) {
+            .long => |l| l.pn_length,
+            .short => |s| s.pn_length,
+        };
+    }
+
+    pub fn pnLength(self: Self) usize {
+        return @intCast(usize, self.rawPnLength()) + 1;
+    }
+};
+
 const MIN_UDP_PAYLOAD_LENGTH = 1200;
 const ConnectionId = connection.ConnectionId;
 
@@ -102,7 +166,7 @@ pub const QUIC_VERSION_1 = 0x00000001;
 
 /// TODO: support 1-RTT packet and rename LongHeaderPacket -> Packet
 pub const LongHeaderPacket = struct {
-    flags: LongHeaderFlags,
+    flags: Flags,
 
     version: u32 = QUIC_VERSION_1,
     dst_cid: ConnectionId,
@@ -130,7 +194,7 @@ pub const LongHeaderPacket = struct {
         allocator: mem.Allocator,
         tls_provider: tls.Provider,
     ) !void {
-        const packet_type = self.flags.packet_type;
+        const packet_type = self.flags.packetType();
 
         // make plain text payload array
         // plain text is (packet number) + (frame payloads) + (padding)
@@ -160,7 +224,7 @@ pub const LongHeaderPacket = struct {
         }
 
         // create header
-        const length_field = plain_text.items.len + self.decodePnLength() + aes_gcm.Aes128Gcm.tag_length;
+        const length_field = plain_text.items.len + self.flags.pnLength() + aes_gcm.Aes128Gcm.tag_length;
         const rem_length = try VariableLengthInt.fromInt(length_field);
         var pn_array = [_]u8{0} ** @sizeOf(u32);
         mem.writeIntBig(u32, &pn_array, self.packet_number);
@@ -181,12 +245,12 @@ pub const LongHeaderPacket = struct {
             try h_writer.writeAll(self.token.?.items);
         }
         try rem_length.encode(h_writer);
-        try h_writer.writeAll(pn_array[pn_array.len - self.decodePnLength() ..]);
+        try h_writer.writeAll(pn_array[pn_array.len - self.flags.pnLength() ..]);
 
         const keys = switch (packet_type) {
             .initial => tls_provider.client_initial orelse return tls.Provider.Error.KeyNotInstalled,
             .handshake => tls_provider.client_handshake orelse return tls.Provider.Error.KeyNotInstalled,
-            else => unreachable,
+            else => tls_provider.server_master orelse return tls.Provider.Error.KeyNotInstalled,
         };
 
         // encrypt
@@ -219,10 +283,8 @@ pub const LongHeaderPacket = struct {
         // read header
         const packet_type = packet_type: {
             const protected_flags =
-                LongHeaderFlags.fromU8(try h_reader.readIntBig(u8));
-            if (protected_flags.header_form == .short)
-                return Error.InvalidHeaderFormat;
-            break :packet_type protected_flags.packet_type;
+                Flags.fromU8(try h_reader.readIntBig(u8));
+            break :packet_type protected_flags.packetType();
         };
         const version = try h_reader.readIntBig(u32);
         const dcid_length = try h_reader.readIntBig(u8);
@@ -273,8 +335,8 @@ pub const LongHeaderPacket = struct {
         defer decrypted_packet.deinit();
 
         // get unprotected first byte and packet number
-        const first_byte = LongHeaderFlags.fromU8(decrypted_packet.items[0]);
-        const pn_length_decoded = @intCast(usize, first_byte.pn_length) + 1;
+        const first_byte = Flags.fromU8(decrypted_packet.items[0]);
+        const pn_length_decoded = first_byte.pnLength();
         const p_number = pn: {
             var pn_array = [_]u8{0} ** @sizeOf(u32);
             mem.copy(
@@ -321,11 +383,6 @@ pub const LongHeaderPacket = struct {
         return self.flags.toU8();
     }
 
-    /// decode packet number length to usize
-    fn decodePnLength(self: *const Self) usize {
-        return @intCast(usize, self.flags.pn_length) + 1;
-    }
-
     /// return token length in VariableLengthInt struct
     fn tokenLengthVlInt(
         self: *const Self,
@@ -349,7 +406,7 @@ pub const LongHeaderPacket = struct {
             temp += token.items.len;
             break :token_field temp;
         } else 0;
-        ret += self.decodePnLength();
+        ret += self.flags.pnLength();
         return ret;
     }
 };
@@ -380,7 +437,7 @@ test "decode initial packet" {
     var initial_packet = try LongHeaderPacket.decodeEncrypted(stream.reader(), testing.allocator, tls_provider);
     defer initial_packet.deinit();
 
-    try testing.expectEqual(@as(u2, 0b01), initial_packet.flags.pn_length);
+    try testing.expectEqual(@as(u2, 0b01), initial_packet.flags.rawPnLength());
     try testing.expectEqual(@as(u32, 0x01), initial_packet.version);
     try testing.expectEqualSlices(
         u8,

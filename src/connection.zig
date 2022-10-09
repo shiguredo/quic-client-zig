@@ -132,7 +132,7 @@ pub const QuicSocket = struct {
         if (self.state == .first_flight) {
             self.dcid = pkt.src_cid;
         }
-        const epoch = pkt.flags.packet_type.toEpoch();
+        const epoch = pkt.flags.packetType().toEpoch();
         for (pkt.payload.items) |frm| {
             switch (frm) {
                 .padding => {},
@@ -195,7 +195,7 @@ pub const QuicSocket = struct {
             .packet_type = .initial,
         };
         return .{
-            .flags = flags,
+            .flags = packet.Flags{ .long = flags },
             .dst_cid = self.dcid,
             .src_cid = self.scid,
             .token = std.ArrayList(u8).init(self.allocator),
@@ -211,7 +211,7 @@ pub const QuicSocket = struct {
             .packet_type = .handshake,
         };
         return .{
-            .flags = flags,
+            .flags = packet.Flags{ .long = flags },
             .dst_cid = self.dcid,
             .src_cid = self.scid,
             .token = null,
@@ -223,7 +223,7 @@ pub const QuicSocket = struct {
     /// add crypto frame to given packet
     /// packet type is must be initial or handshake
     fn addCryptoFrames(self: *Self, pkt: *packet.LongHeaderPacket) !void {
-        const epoch = pkt.flags.packet_type.toEpoch();
+        const epoch = pkt.flags.packetType().toEpoch();
         var s = self.c_streams.getPtr(epoch);
 
         while (try s.sender.emit(RBUF_MAX_LEN, self.allocator)) |rbuf| {
