@@ -165,7 +165,7 @@ const ConnectionId = connection.ConnectionId;
 pub const QUIC_VERSION_1 = 0x00000001;
 
 /// TODO: support 1-RTT packet and rename LongHeaderPacket -> Packet
-pub const LongHeaderPacket = struct {
+pub const Packet = struct {
     flags: Flags,
 
     version: u32 = QUIC_VERSION_1,
@@ -434,7 +434,7 @@ test "decode initial packet" {
     var c_scid = try connection.ConnectionId.fromSlice("\x00");
     try tls_provider.initiateHandshake(&dummy_stream, c_dcid, c_scid);
 
-    var initial_packet = try LongHeaderPacket.decodeEncrypted(stream.reader(), testing.allocator, tls_provider);
+    var initial_packet = try Packet.decodeEncrypted(stream.reader(), testing.allocator, tls_provider);
     defer initial_packet.deinit();
 
     try testing.expectEqual(@as(u2, 0b01), initial_packet.flags.rawPnLength());
