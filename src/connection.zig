@@ -30,7 +30,6 @@ pub const QuicSocket = struct {
     tls_provider: tls.Provider,
     dg_socket: udp.DatagramSocket,
     c_streams: stream.CryptoStreams,
-    ack_ranges: RangeSet,
 
     dcid: ConnectionId,
     scid: ConnectionId,
@@ -59,7 +58,6 @@ pub const QuicSocket = struct {
             .tls_provider = try tls.Provider.init(allocator),
             .dg_socket = udp_sock,
             .c_streams = stream.CryptoStreams.init(allocator),
-            .ack_ranges = RangeSet.init(allocator),
             .dcid = dcid,
             .scid = scid,
             .spaces = Spaces.init(allocator),
@@ -133,6 +131,8 @@ pub const QuicSocket = struct {
             self.dcid = pkt.src_cid;
         }
         const epoch = pkt.flags.packetType().toEpoch();
+        var space = self.spaces.s.getPtr(pkt.flags.packetType().toSpace());
+        try space.ack_ranges.addOne(@intCast(u64, pkt.packet_number));
         for (pkt.payload.items) |frm| {
             switch (frm) {
                 .padding => {},
@@ -145,7 +145,6 @@ pub const QuicSocket = struct {
                 .handshake_done => {},
             }
         }
-        try self.ack_ranges.addOne(@intCast(u64, pkt.packet_number));
     }
 
     fn handleCryptoFrame(self: *Self, c_frame: frame.CryptoFrame, epoch: tls.Epoch) !void {
@@ -156,6 +155,7 @@ pub const QuicSocket = struct {
         );
         try self.tls_provider.handleStream(cs);
         if (epoch == .handshake) {
+            try self.buildPacket(.initial);
             try self.buildPacket(.handshake);
         }
     }
@@ -175,15 +175,18 @@ pub const QuicSocket = struct {
         }
 
         // append ack frame
-        // TODO: append ack frame
+        // TODO: calc ack delay
         const space_enum = packet_type.toSpace();
         var space = self.spaces.s.getPtr(space_enum);
+        var ack_frame = try frame.AckFrame.fromRangeSet(space.ack_ranges, 0, self.allocator);
+        if (ack_frame) |a| {
+            try pkt.payload.append(.{ .ack = a });
+        }
 
         // if payload length is shorter than 20, encryptPacket will fail, so add padding.
         // TODO: remove this padding
         try pkt.payload.append(.{ .padding = .{ .length = 20 } });
 
-        _ = space;
         try self.pkt_buf.append(pkt);
         return;
     }
