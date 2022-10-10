@@ -88,9 +88,7 @@ pub const QuicSocket = struct {
     }
 
     pub fn isConnected(self: Self) bool {
-        // TODO: implement
-        _ = self;
-        return false;
+        return self.state == .connected;
     }
 
     /// recieve data from udp socket and handle it.
@@ -157,6 +155,9 @@ pub const QuicSocket = struct {
         if (epoch == .handshake) {
             try self.buildPacket(.initial);
             try self.buildPacket(.handshake);
+        }
+        if (self.tls_provider.state == .connected) {
+            self.state = .connected;
         }
     }
 
