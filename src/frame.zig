@@ -1,10 +1,12 @@
 const std = @import("std");
 const mem = std.mem;
+const testing = std.testing;
 const util = @import("util.zig");
 const tls = @import("tls.zig");
 const RangeBuf = @import("stream.zig").RangeBuf;
 const Stream = @import("stream.zig").Stream;
 const VariableLengthInt = util.VariableLengthInt;
+const RangeSet = @import("range_set.zig").RangeSet;
 
 pub const FrameTypes = enum {
     padding,
@@ -143,7 +145,82 @@ pub const AckFrame = struct {
             .ecn_counts = ecn_counts,
         };
     }
+
+    pub fn fromRangeSet(set: RangeSet, delay: u64, allocator: mem.Allocator) !?Self {
+        const count = set.count();
+        if (count == 0) return null;
+
+        var instance: Self = undefined;
+        instance.ack_ranges = std.ArrayList(AckRange).init(allocator);
+        instance.ecn_counts = null;
+        errdefer instance.ack_ranges.deinit();
+        instance.ack_delay = try VariableLengthInt.fromInt(delay);
+        const largest = set.ranges.items[count - 1];
+        instance.largest_ack = try VariableLengthInt.fromInt(largest.end - 1);
+        instance.first_ack_range =
+            try VariableLengthInt.fromInt(largest.end - largest.start);
+
+        var prev_smallest = largest.start;
+
+        if (count < 2) return instance;
+
+        var i = count - 2;
+        while (i >= 0) : (i -= 1) {
+            const r = set.ranges.items[i];
+            const gap = prev_smallest - r.end - 1;
+            const range_len = r.end - r.start;
+            try instance.ack_ranges.append(.{
+                .gap = try VariableLengthInt.fromInt(gap),
+                .ack_range_length = try VariableLengthInt.fromInt(range_len),
+            });
+
+            if (i == 0) break;
+            prev_smallest = r.start;
+        }
+
+        return instance;
+    }
 };
+
+test "AckFrame -- fromRangeSet()" {
+    var rset = RangeSet.init(testing.allocator);
+    defer rset.deinit();
+    try rset.add(.{ .start = 0, .end = 100 });
+    try rset.add(.{ .start = 150, .end = 200 });
+    try rset.add(.{ .start = 250, .end = 300 });
+
+    var actual = (try AckFrame.fromRangeSet(rset, 0, testing.allocator)).?;
+    defer actual.deinit();
+    var expect = AckFrame{
+        .largest_ack = try VariableLengthInt.fromInt(299),
+        .ack_delay = try VariableLengthInt.fromInt(0),
+        .first_ack_range = try VariableLengthInt.fromInt(50),
+        .ack_ranges = r: {
+            var arr = std.ArrayList(AckFrame.AckRange).init(testing.allocator);
+            try arr.appendSlice(&[_]AckFrame.AckRange{
+                .{
+                    .gap = try VariableLengthInt.fromInt(49),
+                    .ack_range_length = try VariableLengthInt.fromInt(50),
+                },
+                .{
+                    .gap = try VariableLengthInt.fromInt(49),
+                    .ack_range_length = try VariableLengthInt.fromInt(100),
+                },
+            });
+            break :r arr;
+        },
+        .ecn_counts = null,
+    };
+    defer expect.deinit();
+    try testing.expectEqual(expect.largest_ack, actual.largest_ack);
+    try testing.expectEqual(expect.ack_delay, actual.ack_delay);
+    try testing.expectEqual(expect.first_ack_range, actual.first_ack_range);
+    try testing.expectEqualSlices(
+        AckFrame.AckRange,
+        expect.ack_ranges.items,
+        actual.ack_ranges.items,
+    );
+}
 
 pub const CryptoFrame = struct { // type_id: 0x06
     offset: VariableLengthInt,

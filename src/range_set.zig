@@ -182,6 +182,10 @@ pub const RangeSet = struct {
         return false;
     }
 
+    pub fn count(self: Self) usize {
+        return self.ranges.items.len;
+    }
+
     // struct-local functions
     /// remove N elements from idx
     fn removeN(self: *Self, idx: usize, n: usize) void {
