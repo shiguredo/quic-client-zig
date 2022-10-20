@@ -164,7 +164,6 @@ const ConnectionId = connection.ConnectionId;
 
 pub const QUIC_VERSION_1 = 0x00000001;
 
-/// TODO: support 1-RTT packet and rename LongHeaderPacket -> Packet
 pub const Packet = struct {
     flags: Flags,
 
