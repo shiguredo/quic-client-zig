@@ -402,7 +402,7 @@ pub const Packet = struct {
         ret += if (self.token) |token| token_field: {
             var temp: usize = 0;
             const token_length = (try self.tokenLengthVlInt()).?;
-            temp += token_length.len;
+            temp += token_length.getLength();
             temp += token.items.len;
             break :token_field temp;
         } else 0;
