@@ -29,10 +29,10 @@ pub const QuicTransportParameters = struct {
         param_id: TransportParameterId,
         value: []const u8,
     ) !void {
-        const vl_int_id = try util.VarInt.fromInt(@enumToInt(param_id));
+        const vl_int_id = util.VarInt.fromInt(@enumToInt(param_id));
         var writer = self.parameter_data.writer();
         try vl_int_id.encode(writer);
-        const vl_int_length = try util.VarInt.fromInt(value.len);
+        const vl_int_length = util.VarInt.fromInt(value.len);
         try vl_int_length.encode(writer);
         try writer.writeAll(value);
     }

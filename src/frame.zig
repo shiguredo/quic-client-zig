@@ -96,11 +96,11 @@ pub const AckFrame = struct {
 
     pub fn encode(self: *const Self, writer: anytype) !void {
         const type_id =
-            if (self.ecn_counts) |_| try VarInt.fromInt(0x03) else try VarInt.fromInt(0x02);
+            if (self.ecn_counts) |_| VarInt.fromInt(0x03) else VarInt.fromInt(0x02);
         try type_id.encode(writer);
         try self.largest_ack.encode(writer);
         try self.ack_delay.encode(writer);
-        const ack_range_count = try VarInt.fromInt(self.ack_ranges.items.len);
+        const ack_range_count = VarInt.fromInt(self.ack_ranges.items.len);
         try ack_range_count.encode(writer);
         try self.first_ack_range.encode(writer);
 
@@ -154,11 +154,11 @@ pub const AckFrame = struct {
         instance.ack_ranges = std.ArrayList(AckRange).init(allocator);
         instance.ecn_counts = null;
         errdefer instance.ack_ranges.deinit();
-        instance.ack_delay = try VarInt.fromInt(delay);
+        instance.ack_delay = VarInt.fromInt(delay);
         const largest = set.ranges.items[count - 1];
-        instance.largest_ack = try VarInt.fromInt(largest.end - 1);
+        instance.largest_ack = VarInt.fromInt(largest.end - 1);
         instance.first_ack_range =
-            try VarInt.fromInt(largest.end - largest.start);
+            VarInt.fromInt(largest.end - largest.start);
 
         var prev_smallest = largest.start;
 
@@ -170,8 +170,8 @@ pub const AckFrame = struct {
             const gap = prev_smallest - r.end - 1;
             const range_len = r.end - r.start;
             try instance.ack_ranges.append(.{
-                .gap = try VarInt.fromInt(gap),
-                .ack_range_length = try VarInt.fromInt(range_len),
+                .gap = VarInt.fromInt(gap),
+                .ack_range_length = VarInt.fromInt(range_len),
             });
 
             if (i == 0) break;
@@ -192,19 +192,19 @@ test "AckFrame -- fromRangeSet()" {
     var actual = (try AckFrame.fromRangeSet(rset, 0, testing.allocator)).?;
     defer actual.deinit();
     var expect = AckFrame{
-        .largest_ack = try VarInt.fromInt(299),
-        .ack_delay = try VarInt.fromInt(0),
-        .first_ack_range = try VarInt.fromInt(50),
+        .largest_ack = VarInt.fromInt(299),
+        .ack_delay = VarInt.fromInt(0),
+        .first_ack_range = VarInt.fromInt(50),
         .ack_ranges = r: {
             var arr = std.ArrayList(AckFrame.AckRange).init(testing.allocator);
             try arr.appendSlice(&[_]AckFrame.AckRange{
                 .{
-                    .gap = try VarInt.fromInt(49),
-                    .ack_range_length = try VarInt.fromInt(50),
+                    .gap = VarInt.fromInt(49),
+                    .ack_range_length = VarInt.fromInt(50),
                 },
                 .{
-                    .gap = try VarInt.fromInt(49),
-                    .ack_range_length = try VarInt.fromInt(100),
+                    .gap = VarInt.fromInt(49),
+                    .ack_range_length = VarInt.fromInt(100),
                 },
             });
             break :r arr;
@@ -232,7 +232,7 @@ pub const CryptoFrame = struct { // type_id: 0x06
     /// takes RangeBuf's ownership
     pub fn fromRangeBuf(b: RangeBuf, allocator: mem.Allocator) !Self {
         return .{
-            .offset = try VarInt.fromInt(b.offset),
+            .offset = VarInt.fromInt(b.offset),
             .data = b.buf,
             .allocator = allocator,
         };
@@ -249,10 +249,10 @@ pub const CryptoFrame = struct { // type_id: 0x06
     }
 
     pub fn encode(self: Self, writer: anytype) (@TypeOf(writer).Error || VarInt.Error)!void {
-        const frame_type = try VarInt.fromInt(0x06);
+        const frame_type = VarInt.fromInt(0x06);
         try frame_type.encode(writer);
         try self.offset.encode(writer);
-        const length = try VarInt.fromInt(self.data.len);
+        const length = VarInt.fromInt(self.data.len);
         try length.encode(writer);
         try writer.writeAll(self.data);
     }

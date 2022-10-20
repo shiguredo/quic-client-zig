@@ -225,7 +225,7 @@ pub const Packet = struct {
 
         // create header
         const length_field = plain_text.items.len + self.flags.pnLength() + aes_gcm.Aes128Gcm.tag_length;
-        const rem_length = try VarInt.fromInt(length_field);
+        const rem_length = VarInt.fromInt(length_field);
         var pn_array = [_]u8{0} ** @sizeOf(u32);
         mem.writeIntBig(u32, &pn_array, self.packet_number);
 
@@ -388,7 +388,7 @@ pub const Packet = struct {
         self: *const Self,
     ) VarInt.Error!?VarInt {
         return if (self.token) |token|
-            try VarInt.fromInt(token.items.len)
+            VarInt.fromInt(token.items.len)
         else
             null;
     }

@@ -56,10 +56,6 @@ pub const VarInt = struct {
 
     /// encode to writer in Variable-length-integer format
     pub fn encode(self: *const Self, writer: anytype) @TypeOf(writer).Error!void {
-        // Removed check if the value is smaller than the supremum
-        // if (self.value >= (@as(u64, 1) << @intCast(u6, self.len * 8 - 2)))
-        //     return Error.VLIntLengthShort; // check for having enough length to express the value
-
         const len_bits_mask: u8 = self.len.mask();
 
         var temp = [_]u8{0} ** 8;
@@ -104,12 +100,12 @@ pub const VarInt = struct {
         };
     }
 
-    pub fn fromInt(value: anytype) Error!Self {
+    pub fn fromInt(value: anytype) Self {
         const val_u64 = if (@TypeOf(value) == u64) value else @intCast(u64, value);
         return fromU64(val_u64);
     }
 
-    fn fromU64(value: u64) Error!Self {
+    fn fromU64(value: u64) Self {
         const ONE_BIT_MAX = (1 << 6) - 1;
         const TWO_BITS_MAX = (1 << 14) - 1;
         const FOUR_BITS_MAX = (1 << 30) - 1;
@@ -120,7 +116,7 @@ pub const VarInt = struct {
             (ONE_BIT_MAX + 1)...TWO_BITS_MAX => .two,
             (TWO_BITS_MAX + 1)...FOUR_BITS_MAX => .four,
             (FOUR_BITS_MAX + 1)...EIGHT_BITS_MAX => .eight,
-            else => return Error.VLIntInvalidValue,
+            else => unreachable,
         };
 
         return Self{
@@ -155,7 +151,7 @@ test "encode variable length int to u8 array" {
 }
 
 test "convert to variable length int from u64" {
-    const v_int = try VarInt.fromU64(0x010448ad);
+    const v_int = VarInt.fromInt(@intCast(u64, 0x010448ad));
     try testing.expectEqual(
         VarInt{ .value = 0x010448ad, .len = .four },
         v_int,
