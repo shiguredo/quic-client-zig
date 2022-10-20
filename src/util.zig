@@ -10,7 +10,7 @@ const BufferError = buffer.BufferError;
 
 /// implementation for Variable-Length Interger
 /// https://www.rfc-editor.org/rfc/rfc9000.html#name-variable-length-integer-enc
-pub const VariableLengthInt = struct {
+pub const VarInt = struct {
     len: Length,
     value: u64,
 
@@ -141,13 +141,13 @@ pub const VariableLengthInt = struct {
 test "decode u8 array to variable length int" {
     var buf = Buffer(32).init();
     _ = try buf.writer().write(&[4]u8{ 0x81, 0x04, 0x48, 0xad });
-    const v_int1 = try VariableLengthInt.decode(buf.reader());
-    try testing.expectEqual(VariableLengthInt.Length.four, v_int1.len);
+    const v_int1 = try VarInt.decode(buf.reader());
+    try testing.expectEqual(VarInt.Length.four, v_int1.len);
     try testing.expectEqual(@as(u64, 0x010448ad), v_int1.value);
 }
 
 test "encode variable length int to u8 array" {
-    const v_int = VariableLengthInt{ .value = 0x010448ad, .len = .four };
+    const v_int = VarInt{ .value = 0x010448ad, .len = .four };
     var buf = Buffer(32).init();
     try v_int.encode(buf.writer());
     try testing.expectEqual(@as(usize, 4), buf.unreadLength());
@@ -155,9 +155,9 @@ test "encode variable length int to u8 array" {
 }
 
 test "convert to variable length int from u64" {
-    const v_int = try VariableLengthInt.fromU64(0x010448ad);
+    const v_int = try VarInt.fromU64(0x010448ad);
     try testing.expectEqual(
-        VariableLengthInt{ .value = 0x010448ad, .len = .four },
+        VarInt{ .value = 0x010448ad, .len = .four },
         v_int,
     );
 }

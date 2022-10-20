@@ -10,7 +10,7 @@ const frame = @import("frame.zig");
 const tls = @import("tls.zig");
 const q_crypto = @import("crypto.zig");
 const Stream = @import("stream.zig").Stream;
-const VariableLengthInt = util.VariableLengthInt;
+const VarInt = util.VarInt;
 const SpacesEnum = @import("number_space.zig").SpacesEnum;
 
 const HeaderForm = enum(u1) {
@@ -225,7 +225,7 @@ pub const Packet = struct {
 
         // create header
         const length_field = plain_text.items.len + self.flags.pnLength() + aes_gcm.Aes128Gcm.tag_length;
-        const rem_length = try VariableLengthInt.fromInt(length_field);
+        const rem_length = try VarInt.fromInt(length_field);
         var pn_array = [_]u8{0} ** @sizeOf(u32);
         mem.writeIntBig(u32, &pn_array, self.packet_number);
 
@@ -294,14 +294,14 @@ pub const Packet = struct {
         var scid = try ConnectionId.init(@intCast(usize, scid_length));
         try h_reader.readNoEof(scid.slice());
         const token_length =
-            if (packet_type == .initial) try VariableLengthInt.decode(h_reader) else null;
+            if (packet_type == .initial) try VarInt.decode(h_reader) else null;
         const token = if (packet_type == .initial) token: {
             var temp = std.ArrayList(u8).init(allocator);
             try temp.resize(@intCast(usize, token_length.?.value));
             try h_reader.readNoEof(temp.items);
             break :token temp;
         } else null;
-        const length = try VariableLengthInt.decode(h_reader);
+        const length = try VarInt.decode(h_reader);
 
         // get what is read as header bytes
         const header_bytes = h_stream.history();
@@ -383,12 +383,12 @@ pub const Packet = struct {
         return self.flags.toU8();
     }
 
-    /// return token length in VariableLengthInt struct
+    /// return token length in VarInt struct
     fn tokenLengthVlInt(
         self: *const Self,
-    ) VariableLengthInt.Error!?VariableLengthInt {
+    ) VarInt.Error!?VarInt {
         return if (self.token) |token|
-            try VariableLengthInt.fromInt(token.items.len)
+            try VarInt.fromInt(token.items.len)
         else
             null;
     }
