@@ -277,7 +277,10 @@ pub const Header = struct {
     }
 };
 
-pub const Packet = struct {
+const Packet = struct {};
+
+/// TODO: rewrite PacketOld
+pub const PacketOld = struct {
     flags: Flags,
 
     version: u32 = QUIC_VERSION_1,
@@ -548,7 +551,7 @@ test "decode initial packet" {
     var c_scid = connection.ConnectionId.fromSlice("\x00");
     try tls_provider.initiateHandshake(&dummy_stream, c_dcid, c_scid);
 
-    var initial_packet = try Packet.decodeEncrypted(stream.reader(), testing.allocator, tls_provider);
+    var initial_packet = try PacketOld.decodeEncrypted(stream.reader(), testing.allocator, tls_provider);
     defer initial_packet.deinit();
 
     try testing.expectEqual(@as(u2, 0b01), initial_packet.flags.rawPnLength());

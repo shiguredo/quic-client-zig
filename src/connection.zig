@@ -75,7 +75,7 @@ pub const QuicSocket = struct {
 
     spaces: Spaces,
 
-    pkt_buf: std.ArrayList(packet.Packet),
+    pkt_buf: std.ArrayList(packet.PacketOld),
 
     allocator: mem.Allocator,
 
@@ -92,7 +92,7 @@ pub const QuicSocket = struct {
             .dcid = dcid,
             .scid = scid,
             .spaces = Spaces.init(allocator),
-            .pkt_buf = std.ArrayList(packet.Packet).init(allocator),
+            .pkt_buf = std.ArrayList(packet.PacketOld).init(allocator),
             .allocator = allocator,
         };
     }
@@ -126,7 +126,7 @@ pub const QuicSocket = struct {
     pub fn recv(self: *Self, buf: []const u8) !void {
         var s = std.io.fixedBufferStream(buf);
 
-        while (packet.Packet.decodeEncrypted(
+        while (packet.PacketOld.decodeEncrypted(
             s.reader(),
             self.allocator,
             self.tls_provider,
@@ -155,7 +155,7 @@ pub const QuicSocket = struct {
         _ = try self.dg_socket.write(buf.getUnreadSlice());
     }
 
-    fn handlePacket(self: *Self, pkt: packet.Packet) !void {
+    fn handlePacket(self: *Self, pkt: packet.PacketOld) !void {
         if (self.state == .first_flight) {
             self.dcid = pkt.src_cid;
         }
@@ -223,7 +223,7 @@ pub const QuicSocket = struct {
         return;
     }
 
-    fn buildInitial(self: *Self) !packet.Packet {
+    fn buildInitial(self: *Self) !packet.PacketOld {
         var number_space = self.spaces.s.getPtr(.initial);
         const flags = packet.LongHeaderFlags{
             .pn_length = 0b11,
@@ -239,7 +239,7 @@ pub const QuicSocket = struct {
         };
     }
 
-    fn buildHandshake(self: *Self) !packet.Packet {
+    fn buildHandshake(self: *Self) !packet.PacketOld {
         var number_space = self.spaces.s.getPtr(.handshake);
         const flags = packet.LongHeaderFlags{
             .pn_length = 0b11,
@@ -257,7 +257,7 @@ pub const QuicSocket = struct {
 
     /// add crypto frame to given packet
     /// packet type is must be initial or handshake
-    fn addCryptoFrames(self: *Self, pkt: *packet.Packet) !void {
+    fn addCryptoFrames(self: *Self, pkt: *packet.PacketOld) !void {
         const epoch = pkt.flags.packetType().toEpoch();
         var s = self.c_streams.getPtr(epoch);
 
