@@ -16,9 +16,48 @@ const Spaces = @import("number_space.zig").Spaces;
 
 pub const QuicConfig = struct {};
 
-const MAX_CID_LENGTH = 255;
 const RBUF_MAX_LEN = 4096;
-pub const ConnectionId = std.BoundedArray(u8, MAX_CID_LENGTH);
+pub const ConnectionId = struct {
+    id: Id,
+
+    const Self = @This();
+    pub const Id = std.BoundedArray(u8, CID_CAPACITY);
+    const MAX_CID_LENGTH = 20;
+    const CID_CAPACITY = 255;
+
+    pub fn fromSlice(id: []const u8) Self {
+        return .{
+            .id = Id.fromSlice(id) catch unreachable,
+        };
+    }
+
+    /// the size must be shorter than or equal to CID_CAPACITY (= 255)
+    pub fn initRandom(size: usize) Self {
+        return .{
+            .id = id: {
+                var id = Id.init(size) catch unreachable;
+                crypto.random.bytes(id.slice());
+                break :id id;
+            },
+        };
+    }
+
+    pub fn encode(self: Self, writer: anytype) !void {
+        try writer.writeIntBig(@intCast(u8, self.id.len));
+        try writer.writeAll(self.id.constSlice());
+    }
+
+    pub fn decode(reader: Self) !Self {
+        const len = try reader.readIntBig(u8);
+        return .{
+            .id = id: {
+                var id = Id.init(@intCast(usize, len)) catch unreachable;
+                try reader.readNoEof(id.slice());
+                break :id id;
+            },
+        };
+    }
+};
 
 const ConnectionState = enum {
     first_flight,
@@ -43,16 +82,8 @@ pub const QuicSocket = struct {
     const Self = @This();
 
     pub fn init(udp_sock: udp.DatagramSocket, allocator: mem.Allocator) !Self {
-        const scid = scid: {
-            var id = try ConnectionId.init(8);
-            crypto.random.bytes(id.slice());
-            break :scid id;
-        };
-        const dcid = dcid: {
-            var id = try ConnectionId.init(8);
-            crypto.random.bytes(id.slice());
-            break :dcid id;
-        };
+        const scid = ConnectionId.initRandom(8);
+        const dcid = ConnectionId.initRandom(8);
 
         return Self{
             .tls_provider = try tls.Provider.init(allocator),
@@ -246,6 +277,7 @@ test "connect()" {
         udp_sock,
         testing.allocator,
     );
+    defer conn.close();
     try conn.connect();
 
     var buf = [_]u8{0} ** 4096;
@@ -254,5 +286,4 @@ test "connect()" {
         const n = try udp_sock.read(&buf);
         try conn.recv(buf[0..n]);
     }
-    defer conn.close();
 }

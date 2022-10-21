@@ -164,6 +164,119 @@ const ConnectionId = connection.ConnectionId;
 
 pub const QUIC_VERSION_1 = 0x00000001;
 
+pub const Header = struct {
+    flags: Flags,
+
+    version: u32 = QUIC_VERSION_1,
+    dcid: ConnectionId,
+    scid: ConnectionId,
+    token: ?std.ArrayList(u8) = null, // only for Initial Packet
+    packet_number: u32,
+    length: usize,
+
+    const Self = @This();
+
+    pub const Error = error{
+        InvalidHeaderFormat,
+    };
+
+    pub fn encode(self: Self, writer: anytype) !void {
+        const flags = self.flags;
+        const packet_type = flags.packetType();
+
+        // short header
+        if (packet_type == .short) {
+            try writer.writeIntBig(u8, flags.toU8());
+            try self.dcid.encode(writer);
+            try _encodePacketNumber(self.packet_number, flags.pnLength(), writer);
+
+            return;
+        }
+
+        // long header
+        try writer.writeIntBig(u8, flags.toU8());
+        try writer.writeIntBig(u32, self.version);
+        try self.dcid.encode(writer);
+        try self.scid.encode(writer);
+        if (self.token) |token| {
+            try _encodeToken(token, writer);
+        }
+        switch (packet_type) {
+            .initial, .handshake, .zero_rtt => try VarInt.encodeInt(self.length, writer),
+            else => {},
+        }
+        try _encodePacketNumber(self.packet_number, flags.pnLength(), writer);
+    }
+
+    /// decode header without packet number and payload
+    pub fn decodeNoPacketNumber(reader: anytype, allocator: mem.Allocator) !Self {
+        const flags = Flags.fromU8(try reader.readIntBig(u8));
+        const packet_type = flags.packetType();
+
+        // short header
+        if (packet_type == .short) {
+            const dcid = try ConnectionId.decode(reader);
+            return .{
+                .flags = flags,
+                .dcid = dcid,
+                .scid = undefined,
+                .token = null,
+                .length = undefined,
+                .packet_number = undefined,
+            };
+        }
+
+        // long header
+        const version = try reader.readIntBig(u32);
+        const dcid = try ConnectionId.decode(reader);
+        const scid = try ConnectionId.decode(reader);
+        const token = if (packet_type == .initial) _decodeToken(reader, allocator) else null;
+        const length = switch (packet_type) {
+            .initial, .handshake, .zero_rtt => try VarInt.decodeTo(usize, reader),
+            else => undefined,
+        };
+
+        return .{
+            .flags = flags,
+            .version = version,
+            .dcid = dcid,
+            .scid = scid,
+            .token = token,
+            .length = length,
+            .packet_number = undefined,
+        };
+    }
+
+    fn _encodePacketNumber(pn: u32, length: usize, writer: anytype) !void {
+        var pn_array = [_]u8{0} ** @sizeOf(u32);
+        mem.writeIntBig(u32, &pn_array, pn);
+        try writer.writeAll(pn_array[pn_array.len - length ..]);
+    }
+
+    fn _decodePacketNumber(length: usize, reader: anytype) !u32 {
+        var pn_array = [_]u8{0} ** @sizeOf(u32);
+        try reader.readNoEof(pn_array[pn_array.len - length]);
+        return mem.readIntBig(u32, &pn_array);
+    }
+
+    fn _encodeToken(token: std.ArrayList(u8), writer: anytype) !void {
+        try VarInt.encodeInt(token.items.len, writer);
+        try writer.writeAll(token.items);
+    }
+
+    fn _decodeToken(reader: anytype, allocator: mem.Allocator) !std.ArrayList(u8) {
+        const len = try VarInt.decodeToInt(reader);
+        if (len == 0) return std.ArrayList(u8).init(allocator);
+        return read_token: {
+            var buf = try allocator.alloc(u8, @intCast(usize, len));
+            errdefer allocator.free(buf);
+            try reader.readNoEof(buf);
+            const token = std.ArrayList(u8).fromOwnedSlice(allocator, buf);
+            break :read_token token;
+        };
+    }
+};
+
 pub const Packet = struct {
     flags: Flags,
 
@@ -233,10 +346,10 @@ pub const Packet = struct {
         var h_writer = header.writer();
         try h_writer.writeIntBig(u8, self.firstByte());
         try h_writer.writeIntBig(u32, QUIC_VERSION_1);
-        try h_writer.writeIntBig(u8, @intCast(u8, self.dst_cid.len));
-        try h_writer.writeAll(self.dst_cid.constSlice());
-        try h_writer.writeIntBig(u8, @intCast(u8, self.src_cid.len));
-        try h_writer.writeAll(self.src_cid.constSlice());
+        try h_writer.writeIntBig(u8, @intCast(u8, self.dst_cid.id.len));
+        try h_writer.writeAll(self.dst_cid.id.constSlice());
+        try h_writer.writeIntBig(u8, @intCast(u8, self.src_cid.id.len));
+        try h_writer.writeAll(self.src_cid.id.constSlice());
         if (packet_type == .initial) {
             // token field appears only in Initial packet
             const token_length = (try self.tokenLengthVlInt()).?;
@@ -287,11 +400,13 @@ pub const Packet = struct {
         };
         const version = try h_reader.readIntBig(u32);
         const dcid_length = try h_reader.readIntBig(u8);
-        var dcid = try ConnectionId.init(@intCast(usize, dcid_length));
-        try h_reader.readNoEof(dcid.slice());
+        var dcid_inner = try ConnectionId.Id.init(@intCast(usize, dcid_length));
+        try h_reader.readNoEof(dcid_inner.slice());
+        const dcid = ConnectionId{ .id = dcid_inner };
         const scid_length = try h_reader.readIntBig(u8);
-        var scid = try ConnectionId.init(@intCast(usize, scid_length));
-        try h_reader.readNoEof(scid.slice());
+        var scid_inner = try ConnectionId.Id.init(@intCast(usize, scid_length));
+        try h_reader.readNoEof(scid_inner.slice());
+        const scid = ConnectionId{ .id = scid_inner };
         const token_length =
             if (packet_type == .initial) try VarInt.decode(h_reader) else null;
         const token = if (packet_type == .initial) token: {
@@ -396,8 +511,8 @@ pub const Packet = struct {
     fn headerLengthWithoutLengthField(self: *const Self) !usize {
         var ret: usize = 0;
         ret += 7; // first byte + version field + dcid len field + scid len field
-        ret += self.dst_cid.len;
-        ret += self.src_cid.len;
+        ret += self.dst_cid.id.len;
+        ret += self.src_cid.id.len;
         ret += if (self.token) |token| token_field: {
             var temp: usize = 0;
             const token_length = (try self.tokenLengthVlInt()).?;
@@ -429,8 +544,8 @@ test "decode initial packet" {
     var dummy_stream = Stream.init(testing.allocator);
     defer dummy_stream.deinit();
 
-    var c_dcid = try connection.ConnectionId.fromSlice("\x76\x49\x73\x32\xb6\x4c\x00\x9c");
-    var c_scid = try connection.ConnectionId.fromSlice("\x00");
+    var c_dcid = connection.ConnectionId.fromSlice("\x76\x49\x73\x32\xb6\x4c\x00\x9c");
+    var c_scid = connection.ConnectionId.fromSlice("\x00");
     try tls_provider.initiateHandshake(&dummy_stream, c_dcid, c_scid);
 
     var initial_packet = try Packet.decodeEncrypted(stream.reader(), testing.allocator, tls_provider);
@@ -441,9 +556,9 @@ test "decode initial packet" {
     try testing.expectEqualSlices(
         u8,
         "\x54\x5c\x86\xfd\x3c\xef\xe8\x23",
-        initial_packet.dst_cid.constSlice(),
+        initial_packet.dst_cid.id.constSlice(),
     );
-    try testing.expectEqualSlices(u8, "\x82\xb2\x4f\x07\xa5\x2d\xd4\xcd", initial_packet.src_cid.constSlice());
+    try testing.expectEqualSlices(u8, "\x82\xb2\x4f\x07\xa5\x2d\xd4\xcd", initial_packet.src_cid.id.constSlice());
     try testing.expectEqual(@as(u32, 0x00), initial_packet.packet_number);
 
     try testing.expectEqual(

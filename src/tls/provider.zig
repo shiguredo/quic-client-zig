@@ -151,9 +151,9 @@ pub const Provider = struct {
         c_scid: connection.ConnectionId,
     ) !void {
         try self.setUpMyX25519KeyPair();
-        self.setUpInitial(c_dcid.constSlice());
+        self.setUpInitial(c_dcid.id.constSlice());
         var writer = stream.sender.writer();
-        var ch_msg = try self.createClientHello(c_scid);
+        var ch_msg = try self.createClientHello(c_scid.id.constSlice());
         defer ch_msg.deinit();
         var buf_array = std.ArrayList(u8).init(self.allocator);
         defer buf_array.deinit();
@@ -385,7 +385,7 @@ pub const Provider = struct {
     /// returns ClientHello contained in Handshake union
     fn createClientHello(
         self: *Self,
-        quic_scid: connection.ConnectionId,
+        quic_scid: []const u8,
     ) !tls.Handshake {
         const allocator = self.allocator;
         var c_hello = try tls.ClientHello.init(allocator);
@@ -423,7 +423,7 @@ pub const Provider = struct {
             },
             transport_param: {
                 var params = extension.QuicTransportParameters.init(allocator);
-                try params.appendParam(.initial_scid, quic_scid.constSlice());
+                try params.appendParam(.initial_scid, quic_scid);
                 break :transport_param extension.Extension{ .quic_transport_parameters = params };
             },
         };

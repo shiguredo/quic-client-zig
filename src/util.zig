@@ -74,6 +74,11 @@ pub const VarInt = struct {
         return;
     }
 
+    pub fn encodeInt(value: anytype, writer: anytype) !void {
+        const var_int = VarInt.fromInt(value);
+        try var_int.encode(writer);
+    }
+
     /// decode variable-length-interger-coded array via reader
     pub fn decode(reader: anytype) !Self {
         var buf = [_]u8{0} ** 8;
@@ -98,6 +103,11 @@ pub const VarInt = struct {
             .len = length,
             .value = value,
         };
+    }
+
+    pub fn decodeTo(comptime ReturnType: type, reader: anytype) ReturnType {
+        const var_int = try Self.decode(reader);
+        return @intCast(ReturnType, var_int.value);
     }
 
     pub fn fromInt(value: anytype) Self {
