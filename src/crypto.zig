@@ -475,11 +475,11 @@ pub const HkdfAbst = struct {
         return vtable;
     }
 
-    pub fn extract(self: Self, out: []u8, salt: []const u8, ikm: []const u8) void {
+    pub inline fn extract(self: Self, out: []u8, salt: []const u8, ikm: []const u8) void {
         self.vtable.extract(out, salt, ikm);
     }
 
-    pub fn expand(self: Self, out: []u8, ctx: []const u8, prk: []const u8) void {
+    pub inline fn expand(self: Self, out: []u8, ctx: []const u8, prk: []const u8) void {
         self.vtable.expand(out, ctx, prk);
     }
 
@@ -512,6 +512,131 @@ pub const HkdfAbst = struct {
     }
 };
 
+pub const AeadAbst = struct {
+    aead_type: AeadTypes,
+    tag_length: usize,
+    nonce_length: usize,
+    key_length: usize,
+    vtable: *const VTable,
+
+    const Self = @This();
+
+    pub const AeadTypes = enum {
+        aes128gcm,
+        aes256gcm,
+        chacha20poly1305,
+    };
+
+    const AuthenticationError = error{AuthenticationFailed};
+
+    pub const VTable = struct {
+        encrypt: *const fn (
+            c: []u8,
+            tag: []u8,
+            m: []const u8,
+            ad: []const u8,
+            npub: []const u8,
+            key: []const u8,
+        ) void,
+        decrypt: *const fn (
+            m: []u8,
+            c: []const u8,
+            tag: []const u8,
+            ad: []const u8,
+            npub: []const u8,
+            key: []const u8,
+        ) AuthenticationError!void,
+    };
+
+    pub inline fn encrypt(
+        self: Self,
+        c: []u8,
+        tag: []u8,
+        m: []const u8,
+        ad: []const u8,
+        npub: []const u8,
+        key: []const u8,
+    ) void {
+        self.vtable.encrypt(c, tag, m, ad, npub, key);
+    }
+
+    pub inline fn decrypt(
+        self: Self,
+        m: []u8,
+        c: []const u8,
+        tag: []const u8,
+        ad: []const u8,
+        npub: []const u8,
+        key: []const u8,
+    ) AuthenticationError!void {
+        try self.vtable.decrypt(m, c, tag, ad, npub, key);
+    }
+
+    const instance_aes128gcm = _createComptime(crypto.aead.aes_gcm.Aes128Gcm);
+    const instance_aes256gcm = _createComptime(crypto.aead.aes_gcm.Aes256Gcm);
+    const instance_chacha20poly1305 = _createComptime(crypto.aead.chacha_poly.ChaCha20Poly1305);
+
+    pub fn get(aead_type: AeadTypes) Self {
+        return switch (aead_type) {
+            .aes128gcm => instance_aes128gcm,
+            .aes256gcm => instance_aes256gcm,
+            .chacha20poly1305 => instance_chacha20poly1305,
+        };
+    }
+
+    fn _createComptime(comptime AeadType: type) Self {
+        const vtable = _vtable(AeadType);
+
+        const aead_type: AeadTypes = switch (AeadType) {
+            crypto.aead.aes_gcm.Aes128Gcm => .aes128gcm,
+            crypto.aead.aes_gcm.Aes256Gcm => .aes256gcm,
+            crypto.aead.chacha_poly.ChaCha20Poly1305 => .chacha20poly1305,
+            else => @compileError("Compile error: Aead type invalid."),
+        };
+
+        return .{
+            .aead_type = aead_type,
+            .tag_length = AeadType.tag_length,
+            .nonce_length = AeadType.nonce_length,
+            .key_length = AeadType.key_length,
+            .vtable = &vtable,
+        };
+    }
+
+    fn _vtable(comptime AeadType: type) VTable {
+        const S = struct {
+            const tag_len = AeadType.tag_length;
+            const nonce_len = AeadType.nonce_length;
+            const key_length = AeadType.key_length;
+            pub fn encrypt(
+                c: []u8,
+                tag: []u8,
+                m: []const u8,
+                ad: []const u8,
+                npub: []const u8,
+                key: []const u8,
+            ) void {
+                AeadType.encrypt(c, tag[0..tag_len], m, ad, npub[0..nonce_len].*, key[0..key_length].*);
+            }
+
+            pub fn decrypt(
+                m: []u8,
+                c: []const u8,
+                tag: []const u8,
+                ad: []const u8,
+                npub: []const u8,
+                key: []const u8,
+            ) AuthenticationError!void {
+                try AeadType.decrypt(m, c, tag[0..tag_len].*, ad, npub[0..nonce_len].*, key[0..key_length].*);
+            }
+        };
+        return .{
+            .encrypt = S.encrypt,
+            .decrypt = S.decrypt,
+        };
+    }
+};
+
 test "HkdfAbst.expandLabel()" {
     const hkdf256 = HkdfAbst.get(.sha256);
     const secret =
@@ -527,4 +652,19 @@ test "HkdfAbst.expandLabel()" {
     var buf = [_]u8{0} ** 32;
     hkdf256.expandLabel(&buf, secret, label, context);
     try testing.expectFmt(expected_hex, "{x}", .{fmt.fmtSliceHexLower(&buf)});
+}
+
+test "AeadAbst" {
+    const aes128gcm = AeadAbst.get(.aes128gcm);
+    const key = [_]u8{0x69} ** 32;
+    const nonce = [_]u8{0x42} ** 12;
+    const m = "Test with message";
+    const ad = "Test with associated data";
+    var c: [m.len]u8 = undefined;
+    var m2: [m.len]u8 = undefined;
+    var tag: [16]u8 = undefined;
+    aes128gcm.encrypt(&c, &tag, m, ad, &nonce, &key);
+    try aes128gcm.decrypt(&m2, &c, &tag, ad, &nonce, &key);
+
+    try testing.expectEqualStrings(m, &m2);
 }
