@@ -1,6 +1,9 @@
 const std = @import("std");
 const crypto = std.crypto;
 const mem = std.mem;
+const meta = std.meta;
+const io = std.io;
+const fmt = std.fmt;
 const testing = std.testing;
 
 const util = @import("util.zig");
@@ -399,4 +402,129 @@ pub fn deriveHpMask(
     const ctx = Aes.initEnc(hp_key);
     ctx.encrypt(&mask, &sample);
     return mask;
+}
+
+pub const HkdfAbst = struct {
+    hash_type: HashTypes,
+    mac_length: usize,
+    vtable: *const VTable,
+
+    pub const KEY_LENGTH = 32;
+
+    const Self = @This();
+
+    pub const VTable = struct {
+        extract: *const fn (out: []u8, salt: []const u8, ikm: []const u8) void,
+        expand: *const fn (out: []u8, ctx: []const u8, prk: []const u8) void,
+    };
+
+    pub const HashTypes = enum {
+        sha256,
+        sha512,
+    };
+
+    // To avoid bus error, we have to create instances at compile time.
+    const instance_sha256 = Self._createComptime(.sha256);
+    const instance_sha512 = Self._createComptime(.sha512);
+
+    pub fn get(hash: HashTypes) Self {
+        return switch (hash) {
+            .sha256 => instance_sha256,
+            .sha512 => instance_sha512,
+        };
+    }
+
+    fn _createComptime(comptime hash: HashTypes) Self {
+        const vtable = switch (hash) {
+            .sha256 => _vtableFromHmac(crypto.auth.hmac.sha2.HmacSha256),
+            .sha512 => _vtableFromHmac(crypto.auth.hmac.sha2.HmacSha512),
+        };
+
+        const mac_length = switch (hash) {
+            .sha256 => crypto.auth.hmac.sha2.HmacSha256.mac_length,
+            .sha512 => crypto.auth.hmac.sha2.HmacSha512.mac_length,
+        };
+
+        return .{
+            .hash_type = hash,
+            .mac_length = mac_length,
+            .vtable = &vtable,
+        };
+    }
+
+    fn _vtableFromHmac(comptime HmacType: type) VTable {
+        const HkdfType = crypto.kdf.hkdf.Hkdf(HmacType);
+        const S = struct {
+            pub fn extract(out: []u8, salt: []const u8, ikm: []const u8) void {
+                const extracted = HkdfType.extract(salt, ikm);
+                mem.copy(u8, out, &extracted);
+            }
+
+            pub fn expand(out: []u8, ctx: []const u8, prk: []const u8) void {
+                var prk_buf: [HmacType.mac_length]u8 = undefined;
+                mem.copy(u8, &prk_buf, prk[0..prk_buf.len]);
+                HkdfType.expand(out, ctx, prk_buf);
+            }
+        };
+
+        const vtable = VTable{
+            .extract = S.extract,
+            .expand = S.expand,
+        };
+
+        return vtable;
+    }
+
+    pub fn extract(self: Self, out: []u8, salt: []const u8, ikm: []const u8) void {
+        self.vtable.extract(out, salt, ikm);
+    }
+
+    pub fn expand(self: Self, out: []u8, ctx: []const u8, prk: []const u8) void {
+        self.vtable.expand(out, ctx, prk);
+    }
+
+    /// Defined here: https://www.rfc-editor.org/rfc/rfc8446#section-7.1
+    pub fn expandLabel(
+        self: Self,
+        out: []u8,
+        secret: []const u8,
+        label: []const u8,
+        context: []const u8,
+    ) void {
+        const MAX_LABEL_LEN = 512;
+        var label_buf: [MAX_LABEL_LEN]u8 = undefined;
+        const _label = _makeLabel(&label_buf, label, context, out.len);
+        self.expand(out, _label, secret);
+    }
+
+    /// `out` must be longer than 255 + 255 + 2 = 512 bytes
+    fn _makeLabel(out_buf: []u8, label: []const u8, context: []const u8, length: usize) []u8 {
+        const PREFIX = "tls13 ";
+        var stream = io.fixedBufferStream(out_buf);
+        var writer = stream.writer();
+        writer.writeIntBig(u16, @intCast(u16, length)) catch unreachable;
+        writer.writeIntBig(u8, @intCast(u8, PREFIX.len + label.len)) catch unreachable;
+        writer.writeAll(PREFIX) catch unreachable;
+        writer.writeAll(label) catch unreachable;
+        writer.writeIntBig(u8, @intCast(u8, context.len)) catch unreachable;
+        writer.writeAll(context) catch unreachable;
+        return stream.getWritten();
+    }
+};
+
+test "HkdfAbst.expandLabel()" {
+    const hkdf256 = HkdfAbst.get(.sha256);
+    const secret =
+        "\x33\xad\x0a\x1c\x60\x7e\xc0\x3b\x09\xe6\xcd\x98\x93\x68\x0c\xe2" ++
+        "\x10\xad\xf3\x00\xaa\x1f\x26\x60\xe1\xb2\x2e\x10\xf1\x70\xf9\x2a";
+    const label = "derived";
+    const context =
+        "\xe3\xb0\xc4\x42\x98\xfc\x1c\x14\x9a\xfb\xf4\xc8\x99\x6f\xb9\x24" ++
+        "\x27\xae\x41\xe4\x64\x9b\x93\x4c\xa4\x95\x99\x1b\x78\x52\xb8\x55";
+    const expected_hex =
+        "6f2615a108c702c5678f54fc9dbab697" ++
+        "16c076189c48250cebeac3576c3611ba";
+    var buf = [_]u8{0} ** 32;
+    hkdf256.expandLabel(&buf, secret, label, context);
+    try testing.expectFmt(expected_hex, "{x}", .{fmt.fmtSliceHexLower(&buf)});
 }
