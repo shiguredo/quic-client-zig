@@ -5,6 +5,7 @@ const meta = std.meta;
 const io = std.io;
 const fmt = std.fmt;
 const testing = std.testing;
+const math = std.math;
 
 const util = @import("util.zig");
 const tls = @import("tls.zig");
@@ -484,6 +485,7 @@ pub const HkdfAbst = struct {
     }
 
     /// Defined here: https://www.rfc-editor.org/rfc/rfc8446#section-7.1
+    /// `secret.len` must be `HkdfAbst.KEY_LENGTH`, which is 32
     pub fn expandLabel(
         self: Self,
         out: []u8,
@@ -521,13 +523,31 @@ pub const AeadAbst = struct {
 
     const Self = @This();
 
+    pub const MAX_TAG_LENGTH = math.max3(
+        crypto.aead.aes_gcm.Aes128Gcm.tag_length,
+        crypto.aead.aes_gcm.Aes256Gcm.tag_length,
+        crypto.aead.chacha_poly.ChaCha20Poly1305.tag_length,
+    );
+
+    pub const MAX_NONCE_LENGTH = math.max3(
+        crypto.aead.aes_gcm.Aes128Gcm.nonce_length,
+        crypto.aead.aes_gcm.Aes256Gcm.nonce_length,
+        crypto.aead.chacha_poly.ChaCha20Poly1305.nonce_length,
+    );
+
+    pub const MAX_KEY_LENGTH = math.max3(
+        crypto.aead.aes_gcm.Aes128Gcm.key_length,
+        crypto.aead.aes_gcm.Aes256Gcm.key_length,
+        crypto.aead.chacha_poly.ChaCha20Poly1305.key_length,
+    );
+
     pub const AeadTypes = enum {
         aes128gcm,
         aes256gcm,
         chacha20poly1305,
     };
 
-    const AuthenticationError = error{AuthenticationFailed};
+    pub const AuthenticationError = error{AuthenticationFailed};
 
     pub const VTable = struct {
         encrypt: *const fn (
@@ -667,4 +687,64 @@ test "AeadAbst" {
     try aes128gcm.decrypt(&m2, &c, &tag, ad, &nonce, &key);
 
     try testing.expectEqualStrings(m, &m2);
+}
+
+/// struct that consists of secret, key, iv, and encryption algorithm for QUIC packet protection.
+/// TODO: replace tls.QuicKeys with this.
+pub const QuicKeys2 = struct {
+    hkdf: HkdfAbst,
+    aead: AeadAbst,
+
+    secret: [HkdfAbst.KEY_LENGTH]u8 = undefined,
+    key: Key = undefined,
+    iv: Iv = undefined,
+    hp: Hp = undefined,
+
+    pub const Key = std.BoundedArray(u8, AeadAbst.MAX_KEY_LENGTH);
+    pub const Iv = std.BoundedArray(u8, AeadAbst.MAX_NONCE_LENGTH);
+    pub const Hp = std.BoundedArray(u8, AeadAbst.MAX_KEY_LENGTH);
+
+    const Self = @This();
+
+    /// derive self's keys with its secret
+    pub fn deriveKeysFromSecret(secret: [HkdfAbst.KEY_LENGTH]u8, hkdf: HkdfAbst, aead: AeadAbst) Self {
+        var instance = Self{ .hkdf = hkdf, .aead = aead, .secret = secret };
+        instance.key = Key.init(aead.key_length) catch unreachable;
+        instance.iv = Iv.init(aead.nonce_length) catch unreachable;
+        instance.hp = Hp.init(aead.key_length) catch unreachable;
+        instance.hkdf.expandLabel(instance.key.slice(), &secret, "quic key", "");
+        instance.hkdf.expandLabel(instance.iv.slice(), &secret, "quic iv", "");
+        instance.hkdf.expandLabel(instance.hp.slice(), &secret, "quic hp", "");
+        return instance;
+    }
+};
+
+test "QuicKeys2" {
+    const secret_hex = "c00cf151ca5be075ed0ebfb5c80323c4" ++ "2d6b7db67881289af4008f1f6c357aea";
+    var secret = [_]u8{0} ** HkdfAbst.KEY_LENGTH;
+    _ = try fmt.hexToBytes(&secret, secret_hex);
+    const hkdf = HkdfAbst.get(.sha256);
+    const aead = AeadAbst.get(.aes128gcm);
+    const keys = QuicKeys2.deriveKeysFromSecret(secret, hkdf, aead);
+    
+    // client initial key
+    try testing.expectFmt(
+        "1f369613dd76d5467730efcbe3b1a22d",
+        "{s}",
+        .{std.fmt.fmtSliceHexLower(keys.key.constSlice())},
+    );
+
+    // client iv
+    try testing.expectFmt(
+        "fa044b2f42a3fd3b46fb255c",
+        "{s}",
+        .{std.fmt.fmtSliceHexLower(keys.iv.constSlice())},
+    );
+
+    // client hp key
+    try testing.expectFmt(
+        "9f50449e04a0e810283a1e9933adedd2",
+        "{s}",
+        .{std.fmt.fmtSliceHexLower(keys.hp.constSlice())},
+    );
 }
