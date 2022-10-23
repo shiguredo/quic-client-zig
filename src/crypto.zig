@@ -726,7 +726,7 @@ test "QuicKeys2" {
     const hkdf = HkdfAbst.get(.sha256);
     const aead = AeadAbst.get(.aes128gcm);
     const keys = QuicKeys2.deriveKeysFromSecret(secret, hkdf, aead);
-    
+
     // client initial key
     try testing.expectFmt(
         "1f369613dd76d5467730efcbe3b1a22d",
