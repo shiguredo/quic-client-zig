@@ -3,12 +3,16 @@ const crypto = std.crypto;
 const aes_gcm = crypto.aead.aes_gcm;
 const mem = std.mem;
 const testing = std.testing;
+const io = std.io;
 
 const connection = @import("connection.zig");
 const util = @import("util.zig");
 const frame = @import("frame.zig");
 const tls = @import("tls.zig");
 const q_crypto = @import("crypto.zig");
+const HkdfAbst = q_crypto.HkdfAbst;
+const AeadAbst = q_crypto.AeadAbst;
+const QuicKeys2 = q_crypto.QuicKeys2;
 const Stream = @import("stream.zig").Stream;
 const VarInt = util.VarInt;
 const SpacesEnum = @import("number_space.zig").SpacesEnum;
@@ -171,8 +175,8 @@ pub const Header = struct {
     dcid: ConnectionId,
     scid: ConnectionId,
     token: ?std.ArrayList(u8) = null, // only for Initial Packet
-    packet_number: u32,
     length: usize,
+    packet_number: u32,
 
     const Self = @This();
 
@@ -277,7 +281,77 @@ pub const Header = struct {
     }
 };
 
-const Packet = struct {};
+pub const Packet = struct {
+    pub fn encode(header: *Header, payload_buf: []u8) !void {
+        _ = payload_buf;
+        _ = header;
+    }
+
+    pub const DecodeReturn = struct {
+        header: Header,
+        payload: []const u8,
+        buf_remain: []u8,
+    };
+
+    pub fn decode(buf: []u8, allocator: mem.Allocator, keys: QuicKeys2) !DecodeReturn {
+        var ret: DecodeReturn = undefined;
+        var stream = io.fixedBufferStream(buf);
+
+        ret.header =
+            try Header.decodeNoPacketNumber(stream.reader(), allocator);
+
+        // packet_remain contains packet number field, payload and auth tag.
+        var packet_remain: []u8 = switch (ret.header.flags.packetType()) {
+            .initial, .handshake, .zero_rtt => with_len_field: {
+                const end_pos = stream.pos + ret.header.length;
+                ret.buf_remain = buf[end_pos..];
+                break :with_len_field buf[stream.pos..end_pos];
+            },
+            else => without_len_field: {
+                ret.buf_remain = &[_]u8{};
+                break :without_len_field buf[stream.pos..];
+            },
+        };
+        _decrypt(&ret.header, packet_remain, keys);
+
+        const payload_start = ret.header.flags.pnLength();
+        const payload_end = packet_remain.len - keys.aead.tag_length;
+
+        ret.header.packet_number =
+            _readPacketNumber(packet_remain[0..payload_start]);
+
+        ret.payload =
+            packet_remain[payload_start..payload_end];
+
+        return ret;
+    }
+
+    /// encrypt header and remain packet
+    fn _encrypt(header: *Header, payload_buf: []u8, keys: QuicKeys2) !void {
+        _ = keys;
+        _ = payload_buf;
+        _ = header;
+    }
+
+    /// decrypt header and remain packet
+    fn _decrypt(header: *Header, packet_remain: []u8, keys: QuicKeys2) !void {
+        _ = keys;
+        _ = packet_remain;
+        _ = header;
+    }
+
+    /// octets length must be shorter than 4 bytes.
+    fn _readPacketNumber(octets: []u8) u32 {
+        var buf = [_]u8{0} ** 4;
+        const offset = buf.len - octets.len;
+        mem.copy(u8, buf[offset..], octets);
+        return mem.readIntBig(u32, &buf);
+    }
+};
+
+test "Packet" {
+    _ = Packet;
+}
 
 /// TODO: rewrite PacketOld
 pub const PacketOld = struct {
