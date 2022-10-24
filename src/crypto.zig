@@ -14,7 +14,6 @@ pub const Sha256 = crypto.hash.sha2.Sha256;
 pub const Hmac = crypto.auth.hmac.sha2.HmacSha256;
 pub const Hkdf = crypto.kdf.hkdf.HkdfSha256;
 
-const Aes128Gcm = std.crypto.aead.aes_gcm.Aes128Gcm;
 
 // zig fmt: off
 pub const INITIAL_SALT_V1 = [_]u8{
@@ -227,7 +226,7 @@ test "encryptPacket" {
     };
 
     const encrypted = try encryptPacket(
-        Aes128Gcm,
+        crypto.aead.aes_gcm.Aes128Gcm,
         header,
         payload,
         client_initial.key,
@@ -370,7 +369,7 @@ test "decryptPacket" {
     };
 
     var decrypted = try decryptPacket(
-        Aes128Gcm,
+        crypto.aead.aes_gcm.Aes128Gcm,
         &header,
         &payload,
         initial_keys.key,
@@ -523,22 +522,26 @@ pub const AeadAbst = struct {
 
     const Self = @This();
 
+    pub const Aes128Gcm = crypto.aead.aes_gcm.Aes128Gcm;
+    pub const Aes256Gcm = crypto.aead.aes_gcm.Aes256Gcm;
+    pub const ChaCha20Poly1305 = crypto.aead.chacha_poly.ChaCha20Poly1305;
+
     pub const MAX_TAG_LENGTH = math.max3(
-        crypto.aead.aes_gcm.Aes128Gcm.tag_length,
-        crypto.aead.aes_gcm.Aes256Gcm.tag_length,
-        crypto.aead.chacha_poly.ChaCha20Poly1305.tag_length,
+        Aes128Gcm.tag_length,
+        Aes256Gcm.tag_length,
+        ChaCha20Poly1305.tag_length,
     );
 
     pub const MAX_NONCE_LENGTH = math.max3(
-        crypto.aead.aes_gcm.Aes128Gcm.nonce_length,
-        crypto.aead.aes_gcm.Aes256Gcm.nonce_length,
-        crypto.aead.chacha_poly.ChaCha20Poly1305.nonce_length,
+        Aes128Gcm.nonce_length,
+        Aes256Gcm.nonce_length,
+        ChaCha20Poly1305.nonce_length,
     );
 
     pub const MAX_KEY_LENGTH = math.max3(
-        crypto.aead.aes_gcm.Aes128Gcm.key_length,
-        crypto.aead.aes_gcm.Aes256Gcm.key_length,
-        crypto.aead.chacha_poly.ChaCha20Poly1305.key_length,
+        Aes128Gcm.key_length,
+        Aes256Gcm.key_length,
+        ChaCha20Poly1305.key_length,
     );
 
     pub const AeadTypes = enum {
@@ -592,9 +595,9 @@ pub const AeadAbst = struct {
         try self.vtable.decrypt(m, c, tag, ad, npub, key);
     }
 
-    const instance_aes128gcm = _createComptime(crypto.aead.aes_gcm.Aes128Gcm);
-    const instance_aes256gcm = _createComptime(crypto.aead.aes_gcm.Aes256Gcm);
-    const instance_chacha20poly1305 = _createComptime(crypto.aead.chacha_poly.ChaCha20Poly1305);
+    const instance_aes128gcm = _createComptime(Aes128Gcm);
+    const instance_aes256gcm = _createComptime(Aes256Gcm);
+    const instance_chacha20poly1305 = _createComptime(ChaCha20Poly1305);
 
     pub fn get(aead_type: AeadTypes) Self {
         return switch (aead_type) {
@@ -608,9 +611,9 @@ pub const AeadAbst = struct {
         const vtable = _vtable(AeadType);
 
         const aead_type: AeadTypes = switch (AeadType) {
-            crypto.aead.aes_gcm.Aes128Gcm => .aes128gcm,
-            crypto.aead.aes_gcm.Aes256Gcm => .aes256gcm,
-            crypto.aead.chacha_poly.ChaCha20Poly1305 => .chacha20poly1305,
+            Aes128Gcm => .aes128gcm,
+            Aes256Gcm => .aes256gcm,
+            ChaCha20Poly1305 => .chacha20poly1305,
             else => @compileError("Compile error: Aead type invalid."),
         };
 
