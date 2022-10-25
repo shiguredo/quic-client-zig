@@ -14,7 +14,6 @@ pub const Sha256 = crypto.hash.sha2.Sha256;
 pub const Hmac = crypto.auth.hmac.sha2.HmacSha256;
 pub const Hkdf = crypto.kdf.hkdf.HkdfSha256;
 
-
 // zig fmt: off
 pub const INITIAL_SALT_V1 = [_]u8{
     0x38, 0x76, 0x2c, 0xf7,
