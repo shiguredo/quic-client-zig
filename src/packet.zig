@@ -340,6 +340,33 @@ pub const Packet = struct {
         _ = header;
     }
 
+    const SAMPLE_LEN = 16;
+
+    fn _deriveHpMask(
+        aead_type: AeadAbst.AeadTypes,
+        hp_key: QuicKeys2.Hp,
+        sample: [SAMPLE_LEN]u8,
+    ) [SAMPLE_LEN]u8 {
+        return switch (aead_type) {
+            .aes128gcm => _deriveHpMaskAes(crypto.core.aes.Aes128, hp_key, sample),
+            .aes256gcm => _deriveHpMaskAes(crypto.core.aes.Aes256, hp_key, sample),
+            else => @panic("unimplemented for ChaCha20."),
+        };
+    }
+
+    fn _deriveHpMaskAes(
+        comptime Aes: type,
+        hp_key: QuicKeys2.Hp,
+        sample: [SAMPLE_LEN]u8,
+    ) [SAMPLE_LEN]u8 {
+        const HP_KEY_LEN = Aes.key_bits / 8;
+        std.debug.assert(hp_key.len >= HP_KEY_LEN);
+        var mask = [_]u8{0} ** SAMPLE_LEN;
+        const ctx = Aes.initEnc(hp_key.buffer[0..HP_KEY_LEN]);
+        ctx.encrypt(&mask, &sample);
+        return mask;
+    }
+
     /// octets length must be shorter than 4 bytes.
     fn _readPacketNumber(octets: []u8) u32 {
         var buf = [_]u8{0} ** 4;
