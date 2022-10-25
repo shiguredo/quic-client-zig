@@ -4,6 +4,7 @@ const aes_gcm = crypto.aead.aes_gcm;
 const mem = std.mem;
 const testing = std.testing;
 const io = std.io;
+const fmt = std.fmt;
 
 const connection = @import("connection.zig");
 const util = @import("util.zig");
@@ -175,7 +176,7 @@ pub const Header = struct {
     dcid: ConnectionId,
     scid: ConnectionId,
     token: ?std.ArrayList(u8) = null, // only for Initial Packet
-    length: usize,
+    length: usize = undefined,
     packet_number: u32,
 
     const Self = @This();
@@ -183,6 +184,12 @@ pub const Header = struct {
     pub const Error = error{
         InvalidHeaderFormat,
     };
+
+    pub fn deinit(self: *Self) void {
+        if (self.token) |token| {
+            token.deinit();
+        }
+    }
 
     pub fn encode(self: Self, writer: anytype) !void {
         const flags = self.flags;
@@ -212,13 +219,21 @@ pub const Header = struct {
         try _encodePacketNumber(self.packet_number, flags.pnLength(), writer);
     }
 
+    /// decode full length header, including packet number
+    pub fn decode(reader: anytype, allocator: mem.Allocator) !Self {
+        var instance = try decodeNoPacketNumber(reader, allocator);
+        const pn_len = instance.flags.pnLength();
+        instance.packet_number = try _decodePacketNumber(pn_len, reader);
+        return instance;
+    }
+
     /// decode header without packet number and payload
     pub fn decodeNoPacketNumber(reader: anytype, allocator: mem.Allocator) !Self {
         const flags = Flags.fromU8(try reader.readIntBig(u8));
         const packet_type = flags.packetType();
 
         // short header
-        if (packet_type == .short) {
+        if (packet_type == .one_rtt) {
             const dcid = try ConnectionId.decode(reader);
             return .{
                 .flags = flags,
@@ -234,7 +249,7 @@ pub const Header = struct {
         const version = try reader.readIntBig(u32);
         const dcid = try ConnectionId.decode(reader);
         const scid = try ConnectionId.decode(reader);
-        const token = if (packet_type == .initial) _decodeToken(reader, allocator) else null;
+        const token = if (packet_type == .initial) try _decodeToken(reader, allocator) else null;
         const length = switch (packet_type) {
             .initial, .handshake, .zero_rtt => try VarInt.decodeTo(usize, reader),
             else => undefined,
@@ -259,7 +274,7 @@ pub const Header = struct {
 
     fn _decodePacketNumber(length: usize, reader: anytype) !u32 {
         var pn_array = [_]u8{0} ** @sizeOf(u32);
-        try reader.readNoEof(pn_array[pn_array.len - length]);
+        try reader.readNoEof(pn_array[pn_array.len - length ..]);
         return mem.readIntBig(u32, &pn_array);
     }
 
@@ -269,10 +284,10 @@ pub const Header = struct {
     }
 
     fn _decodeToken(reader: anytype, allocator: mem.Allocator) !std.ArrayList(u8) {
-        const len = try VarInt.decodeToInt(reader);
+        const len = try VarInt.decodeTo(usize, reader);
         if (len == 0) return std.ArrayList(u8).init(allocator);
         return read_token: {
-            var buf = try allocator.alloc(u8, @intCast(usize, len));
+            var buf = try allocator.alloc(u8, len);
             errdefer allocator.free(buf);
             try reader.readNoEof(buf);
             const token = std.ArrayList(u8).fromOwnedSlice(allocator, buf);
@@ -297,31 +312,21 @@ pub const Packet = struct {
         var ret: DecodeReturn = undefined;
         var stream = io.fixedBufferStream(buf);
 
-        ret.header =
+        var encrypted_header =
             try Header.decodeNoPacketNumber(stream.reader(), allocator);
+        defer encrypted_header.deinit();
 
         // packet_remain contains packet number field, payload and auth tag.
-        var packet_remain: []u8 = switch (ret.header.flags.packetType()) {
-            .initial, .handshake, .zero_rtt => with_len_field: {
-                const end_pos = stream.pos + ret.header.length;
-                ret.buf_remain = buf[end_pos..];
-                break :with_len_field buf[stream.pos..end_pos];
-            },
-            else => without_len_field: {
-                ret.buf_remain = &[_]u8{};
-                break :without_len_field buf[stream.pos..];
-            },
+        const end_pos: usize = switch (ret.header.flags.packetType()) {
+            .initial, .handshake, .zero_rtt => stream.pos + encrypted_header.length,
+            else => buf.len,
         };
-        _decrypt(&ret.header, packet_remain, keys);
+        try _decrypt(buf[0..end_pos], stream.pos, keys);
 
-        const payload_start = ret.header.flags.pnLength();
-        const payload_end = packet_remain.len - keys.aead.tag_length;
-
-        ret.header.packet_number =
-            _readPacketNumber(packet_remain[0..payload_start]);
-
-        ret.payload =
-            packet_remain[payload_start..payload_end];
+        stream.reset();
+        ret.header = try Header.decode(stream.reader(), allocator);
+        ret.payload = buf[stream.pos .. end_pos - keys.aead.tag_length];
+        ret.buf_remain = buf[end_pos..];
 
         return ret;
     }
@@ -334,10 +339,36 @@ pub const Packet = struct {
     }
 
     /// decrypt header and remain packet
-    fn _decrypt(header: *Header, packet_remain: []u8, keys: QuicKeys2) !void {
-        _ = keys;
-        _ = packet_remain;
-        _ = header;
+    fn _decrypt(buf: []u8, pn_offset: usize, keys: QuicKeys2) !void {
+        var packet_remain = buf[pn_offset..];
+
+        // make header protection mask
+        const SAMPLE_OFFSET = 4;
+        const sample = packet_remain[SAMPLE_OFFSET .. SAMPLE_OFFSET + SAMPLE_LEN];
+        const mask = _deriveHpMask(keys.aead.aead_type, keys.hp, sample.*);
+
+        // remove header protection
+        switch (buf[0] & 0x80) {
+            0x80 => buf[0] ^= mask[0] & 0x1f, // short header
+            else => buf[0] ^= mask[0] & 0x0f, // long header
+        }
+        const flags = Flags.fromU8(buf[0]);
+        const pn_len = flags.pnLength();
+        _applyXorSlice(packet_remain[0..pn_len], mask[1..]);
+
+        // create nonce
+        var iv = keys.iv;
+        var nonce = iv.slice();
+        _applyXorSlice(nonce[nonce.len - pn_len ..], packet_remain[0..pn_len]);
+
+        // create ad
+        const header_buf = buf[0 .. pn_offset + pn_len];
+
+        // decrypt payload in-place
+        var payload_buf = packet_remain[flags.pnLength()..];
+        const tag = payload_buf[payload_buf.len - AeadAbst.TAG_LENGTH ..];
+        var cipher = payload_buf[0 .. payload_buf.len - AeadAbst.TAG_LENGTH];
+        try keys.aead.decrypt(cipher, cipher, tag, header_buf, nonce, keys.key.constSlice());
     }
 
     const SAMPLE_LEN = 16;
@@ -362,9 +393,15 @@ pub const Packet = struct {
         const HP_KEY_LEN = Aes.key_bits / 8;
         std.debug.assert(hp_key.len >= HP_KEY_LEN);
         var mask = [_]u8{0} ** SAMPLE_LEN;
-        const ctx = Aes.initEnc(hp_key.buffer[0..HP_KEY_LEN]);
+        const ctx = Aes.initEnc(hp_key.buffer[0..HP_KEY_LEN].*);
         ctx.encrypt(&mask, &sample);
         return mask;
+    }
+
+    fn _applyXorSlice(dest: []u8, src: []const u8) void {
+        for (dest) |*elem, idx| {
+            elem.* ^= src[idx];
+        }
     }
 
     /// octets length must be shorter than 4 bytes.
@@ -376,8 +413,42 @@ pub const Packet = struct {
     }
 };
 
-test "Packet" {
-    _ = Packet;
+// From https://www.rfc-editor.org/rfc/rfc9001.html#section-a.3
+test "Packet decode" {
+    var server_initial = [_]u8{0} ** 135;
+    _ = try fmt.hexToBytes(
+        &server_initial,
+        "cf000000010008f067a5502a4262b500" ++ "4075c0d95a482cd0991cd25b0aac406a" ++
+            "5816b6394100f37a1c69797554780bb3" ++ "8cc5a99f5ede4cf73c3ec2493a1839b3" ++
+            "dbcba3f6ea46c5b7684df3548e7ddeb9" ++ "c3bf9c73cc3f3bded74b562bfb19fb84" ++
+            "022f8ef4cdd93795d77d06edbb7aaf2f" ++ "58891850abbdca3d20398c276456cbc4" ++
+            "2158407dd074ee",
+    );
+    var stream = io.fixedBufferStream(&server_initial);
+    _ = stream;
+    var keys = QuicKeys2{
+        .aead = AeadAbst.get(.aes128gcm),
+        .hkdf = HkdfAbst.get(.sha256),
+        .key = try QuicKeys2.Key.init(16),
+        .iv = try QuicKeys2.Iv.init(12),
+        .hp = try QuicKeys2.Hp.init(16),
+    };
+    _ = try fmt.hexToBytes(&keys.secret, "3c199828fd139efd216c155ad844cc81fb82fa8d7446fa7d78be803acdda951b");
+    _ = try fmt.hexToBytes(keys.key.slice(), "cf3a5331653c364c88f0f379b6067e37");
+    _ = try fmt.hexToBytes(keys.iv.slice(), "0ac1493ca1905853b0bba03e");
+    _ = try fmt.hexToBytes(keys.hp.slice(), "c206b8d9b9f0f37644430b490eeaa314");
+    var ret = try Packet.decode(&server_initial, testing.allocator, keys);
+    defer ret.header.deinit();
+
+    try testing.expectFmt(
+        "02000000000600405a020000560303ee" ++ "fce7f7b37ba1d1632e96677825ddf739" ++
+            "88cfc79825df566dc5430b9a045a1200" ++ "130100002e00330024001d00209d3c94" ++
+            "0d89690b84d08a60993c144eca684d10" ++ "81287c834d5311bcf32bb9da1a002b00" ++
+            "020304",
+        "{x}",
+        .{fmt.fmtSliceHexLower(ret.payload)},
+    );
+    try testing.expectEqualSlices(u8, &[_]u8{}, ret.buf_remain);
 }
 
 /// TODO: rewrite PacketOld

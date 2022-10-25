@@ -47,7 +47,7 @@ pub const ConnectionId = struct {
         try writer.writeAll(self.id.constSlice());
     }
 
-    pub fn decode(reader: Self) !Self {
+    pub fn decode(reader: anytype) !Self {
         const len = try reader.readIntBig(u8);
         return .{
             .id = id: {

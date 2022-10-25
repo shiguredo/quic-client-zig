@@ -105,7 +105,7 @@ pub const VarInt = struct {
         };
     }
 
-    pub fn decodeTo(comptime ReturnType: type, reader: anytype) ReturnType {
+    pub fn decodeTo(comptime ReturnType: type, reader: anytype) !ReturnType {
         const var_int = try Self.decode(reader);
         return @intCast(ReturnType, var_int.value);
     }

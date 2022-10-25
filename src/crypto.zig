@@ -525,11 +525,7 @@ pub const AeadAbst = struct {
     pub const Aes256Gcm = crypto.aead.aes_gcm.Aes256Gcm;
     pub const ChaCha20Poly1305 = crypto.aead.chacha_poly.ChaCha20Poly1305;
 
-    pub const MAX_TAG_LENGTH = math.max3(
-        Aes128Gcm.tag_length,
-        Aes256Gcm.tag_length,
-        ChaCha20Poly1305.tag_length,
-    );
+    pub const TAG_LENGTH = 16;
 
     pub const MAX_NONCE_LENGTH = math.max3(
         Aes128Gcm.nonce_length,
