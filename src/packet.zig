@@ -140,15 +140,16 @@ pub const Flags = union(HeaderForm) {
     }
 
     pub fn packetType(self: Self) PacketTypes {
-        if (@as(HeaderForm, self) == .short) {
-            return .one_rtt;
-        } else {
-            return switch (self.long.packet_type) {
-                .initial => .initial,
-                .handshake => .handshake,
-                .zero_rtt => .zero_rtt,
-                .retry => .retry,
-            };
+        switch (self) {
+            .short => return .one_rtt,
+            .long => |long| {
+                return switch (long.packet_type) {
+                    .initial => .initial,
+                    .handshake => .handshake,
+                    .zero_rtt => .zero_rtt,
+                    .retry => .retry,
+                };
+            },
         }
     }
 
