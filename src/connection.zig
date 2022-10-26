@@ -43,7 +43,7 @@ pub const ConnectionId = struct {
     }
 
     pub fn encode(self: Self, writer: anytype) !void {
-        try writer.writeIntBig(@intCast(u8, self.id.len));
+        try writer.writeIntBig(u8, @intCast(u8, self.id.len));
         try writer.writeAll(self.id.constSlice());
     }
 
