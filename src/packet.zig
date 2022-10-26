@@ -310,6 +310,7 @@ pub const Packet = struct {
     pub const EncodeOption = struct {
         add_padding: bool = false,
     };
+    const PADDED_LENGTH = 1200;
 
     pub fn encode(
         out: []u8,
@@ -318,20 +319,43 @@ pub const Packet = struct {
         keys: QuicKeys2,
         option: EncodeOption,
     ) Error!EncodeReturn {
-        _ = option;
         var stream = io.fixedBufferStream(out);
-        header.length = header.flags.pnLength() + payload_buf.len + keys.aead.tag_length;
+        const tag_len = keys.aead.tag_length;
+        header.length = header.flags.pnLength() + payload_buf.len + tag_len;
         header.encode(stream.writer()) catch return Error.EncodingFailed;
+
+        if (option.add_padding and
+            stream.pos + payload_buf.len + tag_len < PADDED_LENGTH)
+        {
+            const pn_offset = stream.pos - header.flags.pnLength();
+            const original_len = header.length;
+            const length =
+                if (original_len >= 256) // original length field is 2 bytes
+                PADDED_LENGTH - pn_offset
+            else // original length field is 1 byte
+                PADDED_LENGTH - pn_offset + 1;
+            header.length = length;
+            stream.reset();
+            header.encode(stream.writer()) catch return Error.EncodingFailed;
+        }
+
         const payload_off = stream.pos;
 
+        // write payload
         stream.writer().writeAll(payload_buf) catch return Error.EncodingFailed;
-        if (stream.pos + keys.aead.tag_length >= out.len) {
+        if (option.add_padding and PADDED_LENGTH - stream.pos - tag_len > 0) {
+            stream
+                .writer()
+                .writeByteNTimes(0x00, PADDED_LENGTH - stream.pos - tag_len) catch return Error.EncodingFailed;
+        }
+        if (stream.pos + tag_len >= out.len) {
             return Error.EncodingFailed;
         }
 
-        _encrypt(out, payload_off, payload_buf.len, keys);
+        const payload_len = stream.pos - payload_off;
+        _encrypt(out, payload_off, payload_len, keys);
 
-        const end_pos = payload_off + payload_buf.len + keys.aead.tag_length;
+        const end_pos = payload_off + payload_len + tag_len;
         return .{
             .encoded = out[0..end_pos],
             .out_remain = out[end_pos..],
@@ -554,6 +578,17 @@ test "Packet encode" {
         "7e78bfe706ca4cf5e9c5453e9f7cfd2b" ++ "8b4c8d169a44e55c88d4a9a7f9474241" ++
         "e221af44860018ab0856972e194cd934";
     try testing.expectFmt(expected_hex, "{s}", .{fmt.fmtSliceHexLower(ret.encoded)});
+
+    // encode with option.add_padding = true
+    var out2 = [_]u8{0} ** 2048;
+    const ret2 = try Packet.encode(
+        &out2,
+        &header,
+        payload[0..245],
+        keys,
+        .{ .add_padding = true },
+    );
+    try testing.expectFmt(expected_hex, "{s}", .{fmt.fmtSliceHexLower(ret2.encoded)});
 }
 
 // From https://www.rfc-editor.org/rfc/rfc9001.html#section-a.3
