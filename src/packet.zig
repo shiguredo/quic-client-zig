@@ -300,6 +300,9 @@ pub const Header = struct {
 };
 
 pub const Packet = struct {
+    header: Header,
+    payload: []const u8,
+
     pub const Error = error{ EncodingFailed, DecodingFailed };
 
     pub const EncodeReturn = struct {
@@ -313,12 +316,14 @@ pub const Packet = struct {
     const PADDED_LENGTH = 1200;
 
     pub fn encode(
+        self: *Packet,
         out: []u8,
-        header: *Header,
-        payload_buf: []u8,
         keys: QuicKeys2,
         option: EncodeOption,
     ) Error!EncodeReturn {
+        var header = &self.*.header;
+        const payload_buf = self.*.payload;
+
         var stream = io.fixedBufferStream(out);
         const tag_len = keys.aead.tag_length;
         header.length = header.flags.pnLength() + payload_buf.len + tag_len;
@@ -363,13 +368,11 @@ pub const Packet = struct {
     }
 
     pub const DecodeReturn = struct {
-        header: Header,
-        payload: []const u8,
+        packet: Packet,
         buf_remain: []u8,
     };
 
     pub fn decode(buf: []u8, allocator: mem.Allocator, keys: QuicKeys2) !DecodeReturn {
-        var ret: DecodeReturn = undefined;
         var stream = io.fixedBufferStream(buf);
 
         var encrypted_header =
@@ -377,15 +380,17 @@ pub const Packet = struct {
         defer encrypted_header.deinit();
 
         // packet_remain contains packet number field, payload and auth tag.
-        const end_pos: usize = switch (ret.header.flags.packetType()) {
+        const end_pos: usize = switch (encrypted_header.flags.packetType()) {
             .initial, .handshake, .zero_rtt => stream.pos + encrypted_header.length,
             else => buf.len,
         };
         try _decrypt(buf[0..end_pos], stream.pos, keys);
 
+        var ret: DecodeReturn = undefined;
+
         stream.reset();
-        ret.header = try Header.decode(stream.reader(), allocator);
-        ret.payload = buf[stream.pos .. end_pos - keys.aead.tag_length];
+        ret.packet.header = try Header.decode(stream.reader(), allocator);
+        ret.packet.payload = buf[stream.pos .. end_pos - keys.aead.tag_length];
         ret.buf_remain = buf[end_pos..];
 
         return ret;
@@ -523,6 +528,7 @@ test "Packet encode" {
         .token = Header.Token.init(testing.allocator),
     };
     defer header.deinit();
+    var packet1 = Packet{ .header = header, .payload = &payload };
 
     var keys = QuicKeys2{
         .aead = AeadAbst.get(.aes128gcm),
@@ -536,7 +542,7 @@ test "Packet encode" {
     _ = try fmt.hexToBytes(keys.hp.slice(), "9f50449e04a0e810283a1e9933adedd2");
 
     var out = [_]u8{0} ** 2048;
-    const ret = try Packet.encode(&out, &header, &payload, keys, .{});
+    const ret = try packet1.encode(&out, keys, .{});
 
     const expected_hex =
         "c000000001088394c8f03e5157080000" ++ "449e7b9aec34d1b1c98dd7689fb8ec11" ++
@@ -580,11 +586,11 @@ test "Packet encode" {
     try testing.expectFmt(expected_hex, "{s}", .{fmt.fmtSliceHexLower(ret.encoded)});
 
     // encode with option.add_padding = true
+    var packet2 = Packet{ .header = header, .payload = payload[0..245] };
+
     var out2 = [_]u8{0} ** 2048;
-    const ret2 = try Packet.encode(
+    const ret2 = try packet2.encode(
         &out2,
-        &header,
-        payload[0..245],
         keys,
         .{ .add_padding = true },
     );
@@ -616,7 +622,7 @@ test "Packet decode" {
     _ = try fmt.hexToBytes(keys.iv.slice(), "0ac1493ca1905853b0bba03e");
     _ = try fmt.hexToBytes(keys.hp.slice(), "c206b8d9b9f0f37644430b490eeaa314");
     var ret = try Packet.decode(&server_initial, testing.allocator, keys);
-    defer ret.header.deinit();
+    defer ret.packet.header.deinit();
 
     try testing.expectFmt(
         "02000000000600405a020000560303ee" ++ "fce7f7b37ba1d1632e96677825ddf739" ++
@@ -624,7 +630,7 @@ test "Packet decode" {
             "0d89690b84d08a60993c144eca684d10" ++ "81287c834d5311bcf32bb9da1a002b00" ++
             "020304",
         "{x}",
-        .{fmt.fmtSliceHexLower(ret.payload)},
+        .{fmt.fmtSliceHexLower(ret.packet.payload)},
     );
     try testing.expectEqualSlices(u8, &[_]u8{}, ret.buf_remain);
 }
