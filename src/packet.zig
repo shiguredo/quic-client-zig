@@ -14,6 +14,7 @@ const q_crypto = @import("crypto.zig");
 const HkdfAbst = q_crypto.HkdfAbst;
 const AeadAbst = q_crypto.AeadAbst;
 const QuicKeys2 = q_crypto.QuicKeys2;
+const QuicKeyBinder = q_crypto.QuicKeyBinder;
 const Stream = @import("stream.zig").Stream;
 const VarInt = util.VarInt;
 const SpacesEnum = @import("number_space.zig").SpacesEnum;
@@ -318,11 +319,13 @@ pub const Packet = struct {
     pub fn encode(
         self: *Packet,
         out: []u8,
-        keys: QuicKeys2,
+        key_binder: QuicKeyBinder,
         option: EncodeOption,
     ) Error!EncodeReturn {
-        var header = &self.*.header;
-        const payload_buf = self.*.payload;
+        var header = &self.header;
+        const payload_buf = self.payload;
+
+        const keys = key_binder.getByPacketType(header.flags.packetType());
 
         var stream = io.fixedBufferStream(out);
         const tag_len = keys.aead.tag_length;
@@ -372,12 +375,14 @@ pub const Packet = struct {
         buf_remain: []u8,
     };
 
-    pub fn decode(buf: []u8, allocator: mem.Allocator, keys: QuicKeys2) !DecodeReturn {
+    pub fn decode(buf: []u8, allocator: mem.Allocator, key_binder: QuicKeyBinder) !DecodeReturn {
         var stream = io.fixedBufferStream(buf);
 
         var encrypted_header =
             try Header.decodeNoPacketNumber(stream.reader(), allocator);
         defer encrypted_header.deinit();
+
+        const keys = key_binder.getByPacketType(encrypted_header.flags.packetType());
 
         // packet_remain contains packet number field, payload and auth tag.
         const end_pos: usize = switch (encrypted_header.flags.packetType()) {
@@ -540,9 +545,11 @@ test "Packet encode" {
     _ = try fmt.hexToBytes(keys.key.slice(), "1f369613dd76d5467730efcbe3b1a22d");
     _ = try fmt.hexToBytes(keys.iv.slice(), "fa044b2f42a3fd3b46fb255c");
     _ = try fmt.hexToBytes(keys.hp.slice(), "9f50449e04a0e810283a1e9933adedd2");
+    var key_binder: QuicKeyBinder = undefined;
+    key_binder.initial = keys;
 
     var out = [_]u8{0} ** 2048;
-    const ret = try packet1.encode(&out, keys, .{});
+    const ret = try packet1.encode(&out, key_binder, .{});
 
     const expected_hex =
         "c000000001088394c8f03e5157080000" ++ "449e7b9aec34d1b1c98dd7689fb8ec11" ++
@@ -591,7 +598,7 @@ test "Packet encode" {
     var out2 = [_]u8{0} ** 2048;
     const ret2 = try packet2.encode(
         &out2,
-        keys,
+        key_binder,
         .{ .add_padding = true },
     );
     try testing.expectFmt(expected_hex, "{s}", .{fmt.fmtSliceHexLower(ret2.encoded)});
@@ -621,7 +628,10 @@ test "Packet decode" {
     _ = try fmt.hexToBytes(keys.key.slice(), "cf3a5331653c364c88f0f379b6067e37");
     _ = try fmt.hexToBytes(keys.iv.slice(), "0ac1493ca1905853b0bba03e");
     _ = try fmt.hexToBytes(keys.hp.slice(), "c206b8d9b9f0f37644430b490eeaa314");
-    var ret = try Packet.decode(&server_initial, testing.allocator, keys);
+    var key_binder: QuicKeyBinder = undefined;
+    key_binder.initial = keys;
+
+    var ret = try Packet.decode(&server_initial, testing.allocator, key_binder);
     defer ret.packet.header.deinit();
 
     try testing.expectFmt(

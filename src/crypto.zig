@@ -9,6 +9,7 @@ const math = std.math;
 
 const util = @import("util.zig");
 const tls = @import("tls.zig");
+const PacketTypes = @import("packet.zig").PacketTypes;
 
 pub const Sha256 = crypto.hash.sha2.Sha256;
 pub const Hmac = crypto.auth.hmac.sha2.HmacSha256;
@@ -746,3 +747,22 @@ test "QuicKeys2" {
         .{std.fmt.fmtSliceHexLower(keys.hp.constSlice())},
     );
 }
+
+pub const QuicKeyBinder = struct {
+    initial: QuicKeys2,
+    handshake: QuicKeys2,
+    zero_rtt: QuicKeys2,
+    one_rtt: QuicKeys2,
+
+    const Self = @This();
+
+    pub fn getByPacketType(self: Self, p_type: PacketTypes) QuicKeys2 {
+        return switch (p_type) {
+            .initial => self.initial,
+            .handshake => self.handshake,
+            .zero_rtt => self.zero_rtt,
+            .one_rtt => self.one_rtt,
+            else => unreachable, // TODO: handling version negotiation
+        };
+    }
+};
