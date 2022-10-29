@@ -690,7 +690,7 @@ test "AeadAbst" {
 
 /// struct that consists of secret, key, iv, and encryption algorithm for QUIC packet protection.
 /// TODO: replace tls.QuicKeys with this.
-pub const QuicKeys2 = struct {
+pub const QuicKeys = struct {
     hkdf: HkdfAbst,
     aead: AeadAbst,
 
@@ -718,13 +718,13 @@ pub const QuicKeys2 = struct {
     }
 };
 
-test "QuicKeys2" {
+test "QuicKeys" {
     const secret_hex = "c00cf151ca5be075ed0ebfb5c80323c4" ++ "2d6b7db67881289af4008f1f6c357aea";
     var secret = [_]u8{0} ** HkdfAbst.KEY_LENGTH;
     _ = try fmt.hexToBytes(&secret, secret_hex);
     const hkdf = HkdfAbst.get(.sha256);
     const aead = AeadAbst.get(.aes128gcm);
-    const keys = QuicKeys2.deriveKeysFromSecret(secret, hkdf, aead);
+    const keys = QuicKeys.deriveKeysFromSecret(secret, hkdf, aead);
 
     // client initial key
     try testing.expectFmt(
@@ -749,14 +749,14 @@ test "QuicKeys2" {
 }
 
 pub const QuicKeyBinder = struct {
-    initial: QuicKeys2,
-    handshake: QuicKeys2,
-    zero_rtt: QuicKeys2,
-    one_rtt: QuicKeys2,
+    initial: QuicKeys,
+    handshake: QuicKeys,
+    zero_rtt: QuicKeys,
+    one_rtt: QuicKeys,
 
     const Self = @This();
 
-    pub fn getByPacketType(self: Self, p_type: PacketTypes) QuicKeys2 {
+    pub fn getByPacketType(self: Self, p_type: PacketTypes) QuicKeys {
         return switch (p_type) {
             .initial => self.initial,
             .handshake => self.handshake,

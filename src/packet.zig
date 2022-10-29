@@ -13,7 +13,7 @@ const tls = @import("tls.zig");
 const q_crypto = @import("crypto.zig");
 const HkdfAbst = q_crypto.HkdfAbst;
 const AeadAbst = q_crypto.AeadAbst;
-const QuicKeys2 = q_crypto.QuicKeys2;
+const QuicKeys = q_crypto.QuicKeys;
 const QuicKeyBinder = q_crypto.QuicKeyBinder;
 const Stream = @import("stream.zig").Stream;
 const VarInt = util.VarInt;
@@ -402,7 +402,7 @@ pub const Packet = struct {
     }
 
     /// encrypt header and remain packet
-    fn _encrypt(buf: []u8, payload_off: usize, payload_len: usize, keys: QuicKeys2) void {
+    fn _encrypt(buf: []u8, payload_off: usize, payload_len: usize, keys: QuicKeys) void {
         const flags = Flags.fromU8(buf[0]);
         const pn_len = flags.pnLength();
         const pn_offset = payload_off - pn_len;
@@ -437,7 +437,7 @@ pub const Packet = struct {
     }
 
     /// decrypt header and remain packet
-    fn _decrypt(buf: []u8, pn_offset: usize, keys: QuicKeys2) !void {
+    fn _decrypt(buf: []u8, pn_offset: usize, keys: QuicKeys) !void {
         var packet_remain = buf[pn_offset..];
 
         // make header protection mask
@@ -473,7 +473,7 @@ pub const Packet = struct {
 
     fn _deriveHpMask(
         aead_type: AeadAbst.AeadTypes,
-        hp_key: QuicKeys2.Hp,
+        hp_key: QuicKeys.Hp,
         sample: [SAMPLE_LEN]u8,
     ) [SAMPLE_LEN]u8 {
         return switch (aead_type) {
@@ -485,7 +485,7 @@ pub const Packet = struct {
 
     fn _deriveHpMaskAes(
         comptime Aes: type,
-        hp_key: QuicKeys2.Hp,
+        hp_key: QuicKeys.Hp,
         sample: [SAMPLE_LEN]u8,
     ) [SAMPLE_LEN]u8 {
         const HP_KEY_LEN = Aes.key_bits / 8;
@@ -535,12 +535,12 @@ test "Packet encode" {
     defer header.deinit();
     var packet1 = Packet{ .header = header, .payload = &payload };
 
-    var keys = QuicKeys2{
+    var keys = QuicKeys{
         .aead = AeadAbst.get(.aes128gcm),
         .hkdf = HkdfAbst.get(.sha256),
-        .key = try QuicKeys2.Key.init(16),
-        .iv = try QuicKeys2.Iv.init(12),
-        .hp = try QuicKeys2.Hp.init(16),
+        .key = try QuicKeys.Key.init(16),
+        .iv = try QuicKeys.Iv.init(12),
+        .hp = try QuicKeys.Hp.init(16),
     };
     _ = try fmt.hexToBytes(keys.key.slice(), "1f369613dd76d5467730efcbe3b1a22d");
     _ = try fmt.hexToBytes(keys.iv.slice(), "fa044b2f42a3fd3b46fb255c");
@@ -617,12 +617,12 @@ test "Packet decode" {
     );
     var stream = io.fixedBufferStream(&server_initial);
     _ = stream;
-    var keys = QuicKeys2{
+    var keys = QuicKeys{
         .aead = AeadAbst.get(.aes128gcm),
         .hkdf = HkdfAbst.get(.sha256),
-        .key = try QuicKeys2.Key.init(16),
-        .iv = try QuicKeys2.Iv.init(12),
-        .hp = try QuicKeys2.Hp.init(16),
+        .key = try QuicKeys.Key.init(16),
+        .iv = try QuicKeys.Iv.init(12),
+        .hp = try QuicKeys.Hp.init(16),
     };
     _ = try fmt.hexToBytes(&keys.secret, "3c199828fd139efd216c155ad844cc81fb82fa8d7446fa7d78be803acdda951b");
     _ = try fmt.hexToBytes(keys.key.slice(), "cf3a5331653c364c88f0f379b6067e37");
