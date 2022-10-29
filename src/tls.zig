@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub const QuicKeys = @import("tls/provider.zig").QuicKeys;
+// pub const QuicKeys = @import("tls/provider.zig").QuicKeys;
 pub const Provider = @import("tls/provider.zig").Provider;
 
 pub const TlsMessageType = @import("tls/tls_message.zig").TlsMessageType;
