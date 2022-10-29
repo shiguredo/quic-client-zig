@@ -7,6 +7,9 @@ const fmt = std.fmt;
 const connection = @import("../connection.zig");
 const q_crypto = @import("../crypto.zig");
 const HkdfAbst = q_crypto.HkdfAbst;
+const AeadAbst = q_crypto.AeadAbst;
+const QuicKeys = q_crypto.QuicKeys;
+const QuicKeyBinder = q_crypto.QuicKeyBinder;
 const tls = @import("../tls.zig");
 const HandshakeRaw = @import("handshake.zig").HandshakeRaw;
 const extension = tls.extension;
@@ -96,6 +99,9 @@ pub const Provider = struct {
     master_secret: ?[Hmac.key_length]u8 = null,
     client_master: ?TlsKey = null,
     server_master: ?TlsKey = null,
+
+    client_keys: QuicKeyBinder = undefined,
+    server_keys: QuicKeyBinder = undefined,
 
     x25519_keypair: ?X25519.KeyPair = null,
     x25519_peer: ?[X25519.public_length]u8 = null,
@@ -268,6 +274,10 @@ pub const Provider = struct {
             defer allocator.free(message);
             self.client_handshake = TlsKey.deriveHandshakeClient(hs_secret, message);
             self.server_handshake = TlsKey.deriveHandshakeServer(hs_secret, message);
+
+            // TODO: make algorithm changable
+            self.client_keys.handshake = QuicKeys.deriveKeysFromSecret(self.client_handshake.?.secret, HkdfAbst.get(.sha256), AeadAbst.get(.aes128gcm));
+            self.server_keys.handshake = QuicKeys.deriveKeysFromSecret(self.server_handshake.?.secret, HkdfAbst.get(.sha256), AeadAbst.get(.aes128gcm));
         } else return Error.MessageNotInstalled;
     }
 
@@ -299,6 +309,10 @@ pub const Provider = struct {
         defer allocator.free(message);
         self.client_master = TlsKey.deriveApplicationClient(master_secret, message);
         self.server_master = TlsKey.deriveApplicationServer(master_secret, message);
+
+        // TODO: make algorithm changable
+        self.client_keys.one_rtt = QuicKeys.deriveKeysFromSecret(self.client_master.?.secret, HkdfAbst.get(.sha256), AeadAbst.get(.aes128gcm));
+        self.server_keys.one_rtt = QuicKeys.deriveKeysFromSecret(self.server_master.?.secret, HkdfAbst.get(.sha256), AeadAbst.get(.aes128gcm));
     }
 
     /// Reads bytes from self.raw_sh and handle it
