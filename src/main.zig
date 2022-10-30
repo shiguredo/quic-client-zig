@@ -26,7 +26,6 @@ pub fn main() !void {
 }
 
 test "all" {
-    _ = @import("buffer.zig");
     _ = @import("packet.zig");
     _ = @import("frame.zig");
     _ = @import("tls.zig");

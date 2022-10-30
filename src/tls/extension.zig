@@ -168,7 +168,7 @@ pub const SignatureScheme = enum(u16) {
 };
 
 test "Extension" {
-    const Buffer = @import("../buffer.zig").Buffer;
+    const Buffer = @import("../util.zig").Buffer;
     var buf = Buffer(1024).init();
 
     // supported groups

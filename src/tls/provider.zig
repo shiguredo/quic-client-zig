@@ -12,7 +12,7 @@ const AeadAbst = q_crypto.AeadAbst;
 const tls = @import("../tls.zig");
 const HandshakeRaw = @import("handshake.zig").HandshakeRaw;
 const extension = tls.extension;
-const Buffer = @import("../buffer.zig").Buffer;
+const Buffer = @import("../util.zig").Buffer;
 
 const QuicApi = @import("quic_api.zig").QuicApi;
 

@@ -10,7 +10,7 @@ const packet = @import("packet.zig");
 const frame = @import("frame.zig");
 const util = @import("util.zig");
 const stream = @import("stream.zig");
-const Buffer = @import("buffer.zig").Buffer;
+const Buffer = util.Buffer;
 const RangeSet = @import("range_set.zig").RangeSet;
 const Spaces = @import("number_space.zig").Spaces;
 

@@ -145,7 +145,7 @@ pub const HandshakeRaw = struct {
 };
 
 test "encode client hello" {
-    const Buffer = @import("../buffer.zig").Buffer;
+    const Buffer = @import("../util.zig").Buffer;
 
     var client_hello = try ClientHello.init(testing.allocator);
     try client_hello.appendCipher([_]u8{ 0x13, 0x01 }); // TLS_AES_128_GCM_SHA256
