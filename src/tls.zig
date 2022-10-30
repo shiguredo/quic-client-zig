@@ -1,7 +1,7 @@
 const std = @import("std");
 
 // pub const QuicKeys = @import("tls/provider.zig").QuicKeys;
-pub const Provider = @import("tls/provider.zig").Provider;
+pub const Provider = @import("tls/provider.zig").ClientImpl;
 
 pub const TlsMessageType = @import("tls/tls_message.zig").TlsMessageType;
 pub const TlsMessage = @import("tls/tls_message.zig").TlsMessage;
@@ -14,13 +14,7 @@ pub const ServerHello = @import("tls/client_server_hello.zig").ServerHello;
 
 pub const extension = @import("tls/extension.zig");
 
-pub const Epoch = enum {
-    initial,
-    zero_rtt,
-    handshake,
-    one_rtt,
-    no_crypto,
-};
+pub const Epoch = @import("tls/provider.zig").Epoch;
 
 test {
     std.testing.refAllDecls(@This());

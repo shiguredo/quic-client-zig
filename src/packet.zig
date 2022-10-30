@@ -48,6 +48,7 @@ pub const PacketTypes = enum {
             .initial => .initial,
             .zero_rtt => .zero_rtt,
             .handshake => .handshake,
+            .one_rtt => .one_rtt,
             else => .no_crypto,
         };
     }
