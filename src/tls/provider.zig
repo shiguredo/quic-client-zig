@@ -91,446 +91,441 @@ pub fn deriveSecret(
 }
 
 /// note: only supports aes128gcm for AEAD and hkdfsha256 for HKDF now
-/// `ApiType` in the argument must be quic_api.QuicApi()'s return type
-pub fn ClientImpl(comptime ApiType: type) type {
-    return struct {
-        api: ApiType,
+pub const Client = struct {
+    api: QuicApi,
 
-        state: State = .start,
+    state: State = .start,
 
-        initial_secret: [Hmac.key_length]u8 = undefined,
-        client_initial: ?TlsKey = null,
-        server_initial: ?TlsKey = null,
+    initial_secret: [Hmac.key_length]u8 = undefined,
+    client_initial: ?TlsKey = null,
+    server_initial: ?TlsKey = null,
 
-        early_secret: ?[Hmac.key_length]u8 = null,
-        handshake_secret: ?[Hmac.key_length]u8 = null,
-        client_handshake: ?TlsKey = null,
-        server_handshake: ?TlsKey = null,
-        master_secret: ?[Hmac.key_length]u8 = null,
-        client_master: ?TlsKey = null,
-        server_master: ?TlsKey = null,
+    early_secret: ?[Hmac.key_length]u8 = null,
+    handshake_secret: ?[Hmac.key_length]u8 = null,
+    client_handshake: ?TlsKey = null,
+    server_handshake: ?TlsKey = null,
+    master_secret: ?[Hmac.key_length]u8 = null,
+    client_master: ?TlsKey = null,
+    server_master: ?TlsKey = null,
 
-        x25519_keypair: ?X25519.KeyPair = null,
-        x25519_peer: ?[X25519.public_length]u8 = null,
+    x25519_keypair: ?X25519.KeyPair = null,
+    x25519_peer: ?[X25519.public_length]u8 = null,
 
-        shared_key: ?[X25519.shared_length]u8 = null,
+    shared_key: ?[X25519.shared_length]u8 = null,
 
-        /// client hello raw data
-        raw_ch: ?HandshakeRaw = null,
-        /// server hello raw data
-        raw_sh: ?HandshakeRaw = null,
-        /// encrypted extensions raw data
-        raw_ee: ?HandshakeRaw = null,
-        /// certificate raw data
-        raw_cert: ?HandshakeRaw = null,
-        /// certificate verify raw data
-        raw_cv: ?HandshakeRaw = null,
-        /// server finished raw data
-        raw_sfin: ?HandshakeRaw = null,
+    /// client hello raw data
+    raw_ch: ?HandshakeRaw = null,
+    /// server hello raw data
+    raw_sh: ?HandshakeRaw = null,
+    /// encrypted extensions raw data
+    raw_ee: ?HandshakeRaw = null,
+    /// certificate raw data
+    raw_cert: ?HandshakeRaw = null,
+    /// certificate verify raw data
+    raw_cv: ?HandshakeRaw = null,
+    /// server finished raw data
+    raw_sfin: ?HandshakeRaw = null,
 
-        allocator: mem.Allocator,
+    allocator: mem.Allocator,
 
-        const Self = @This();
+    const Self = @This();
 
-        pub const QuicApi = ApiType;
+    pub const Error = error{ KeyNotInstalled, MessageNotInstalled };
+    const HandshakeHandlingError =
+        error{ MessageIncomplete, HandshakeTypeError };
 
-        pub const Error = error{ KeyNotInstalled, MessageNotInstalled };
-        const HandshakeHandlingError =
-            error{ MessageIncomplete, HandshakeTypeError };
+    const BUF_SIZE = 2048;
 
-        const BUF_SIZE = 2048;
+    pub fn init(allocator: mem.Allocator) Self {
+        var instance = Self{
+            .api = undefined,
+            .allocator = allocator,
+        };
+        return instance;
+    }
 
-        pub fn init(allocator: mem.Allocator) Self {
-            var instance = Self{
-                .api = undefined,
-                .allocator = allocator,
+    pub fn initWithApi(allocator: mem.Allocator, api: QuicApi) Self {
+        var instance = Self.init(allocator);
+        instance.api = api;
+        return instance;
+    }
+
+    pub fn deinit(self: *Self) void {
+        if (self.raw_ch) |h| h.deinit();
+        if (self.raw_sh) |h| h.deinit();
+        if (self.raw_ee) |h| h.deinit();
+        if (self.raw_cert) |h| h.deinit();
+        if (self.raw_cv) |h| h.deinit();
+        if (self.raw_sfin) |h| h.deinit();
+    }
+
+    /// initiate TLS handshake, takes QUIC source connection ID and initial crypto stream.
+    pub fn initiateHandshake(
+        self: *Self,
+        c_scid: connection.ConnectionId,
+    ) !void {
+        try self.setUpMyX25519KeyPair();
+        var writer = self.api.getWriter(.initial);
+        var ch_msg = try self.createClientHello(c_scid.id.constSlice());
+        defer ch_msg.deinit();
+        var buf = [_]u8{0} ** 1024;
+        var stream = io.fixedBufferStream(&buf);
+        try ch_msg.encode(stream.writer());
+        try writer.writeAll(stream.getWritten());
+    }
+
+    /// Read data from
+    pub fn doHandshake(
+        self: *Self,
+        data: []const u8,
+    ) !void {
+        if (self.state == .start) {
+            return;
+        }
+
+        var buf = Buffer(BUF_SIZE).init();
+        var stream = io.fixedBufferStream(data);
+        var reader = stream.reader();
+
+        read_loop: while (true) {
+            try buf.readFrom(reader);
+            if (buf.unreadLength() == 0) break;
+
+            // write data to current state's handshakeRaw struct
+            var raw_hs_ptr = switch (self.state) {
+                .wait_sh => &self.raw_sh,
+                .wait_ee => &self.raw_ee,
+                .wait_cert_cr => &self.raw_cert,
+                .wait_cv => &self.raw_cv,
+                .wait_fin => &self.raw_sfin,
+                else => unreachable,
             };
-            return instance;
-        }
+            handleRaw(raw_hs_ptr, &buf, self.allocator) catch |err| {
+                if (err == error.DataTooShort) {
+                    buf.realign();
+                    continue :read_loop;
+                } else return err;
+            };
 
-        pub fn initWithApi(allocator: mem.Allocator, api: ApiType) Self {
-            var instance = Self.init(allocator);
-            instance.api = api;
-            return instance;
-        }
-
-        pub fn deinit(self: *Self) void {
-            if (self.raw_ch) |h| h.deinit();
-            if (self.raw_sh) |h| h.deinit();
-            if (self.raw_ee) |h| h.deinit();
-            if (self.raw_cert) |h| h.deinit();
-            if (self.raw_cv) |h| h.deinit();
-            if (self.raw_sfin) |h| h.deinit();
-        }
-
-        /// initiate TLS handshake, takes QUIC source connection ID and initial crypto stream.
-        pub fn initiateHandshake(
-            self: *Self,
-            c_scid: connection.ConnectionId,
-        ) !void {
-            try self.setUpMyX25519KeyPair();
-            var writer = self.api.getWriter(.initial);
-            var ch_msg = try self.createClientHello(c_scid.id.constSlice());
-            defer ch_msg.deinit();
-            var buf = [_]u8{0} ** 1024;
-            var stream = io.fixedBufferStream(&buf);
-            try ch_msg.encode(stream.writer());
-            try writer.writeAll(stream.getWritten());
-        }
-
-        /// Read data from
-        pub fn doHandshake(
-            self: *Self,
-            data: []const u8,
-        ) !void {
-            if (self.state == .start) {
-                return;
-            }
-
-            var buf = Buffer(BUF_SIZE).init();
-            var stream = io.fixedBufferStream(data);
-            var reader = stream.reader();
-
-            read_loop: while (true) {
-                try buf.readFrom(reader);
-                if (buf.unreadLength() == 0) break;
-
-                // write data to current state's handshakeRaw struct
-                var raw_hs_ptr = switch (self.state) {
-                    .wait_sh => &self.raw_sh,
-                    .wait_ee => &self.raw_ee,
-                    .wait_cert_cr => &self.raw_cert,
-                    .wait_cv => &self.raw_cv,
-                    .wait_fin => &self.raw_sfin,
-                    else => unreachable,
-                };
-                handleRaw(raw_hs_ptr, &buf, self.allocator) catch |err| {
-                    if (err == error.DataTooShort) {
-                        buf.realign();
-                        continue :read_loop;
-                    } else return err;
-                };
-
-                // call current state's handling function
-                switch (self.state) {
-                    .wait_sh => try self.handleServerHello(),
-                    .wait_ee => try self.handleEncryptedExtensions(),
-                    .wait_cert_cr => try self.handleCertificate(),
-                    .wait_cv => try self.handleCertificateVerify(),
-                    .wait_fin => {
-                        var writer = self.api.getWriter(.handshake);
-                        try self.handleFinished();
-                        try self.writeFinished(writer);
-                    },
-                    else => unreachable,
-                }
+            // call current state's handling function
+            switch (self.state) {
+                .wait_sh => try self.handleServerHello(),
+                .wait_ee => try self.handleEncryptedExtensions(),
+                .wait_cert_cr => try self.handleCertificate(),
+                .wait_cv => try self.handleCertificateVerify(),
+                .wait_fin => {
+                    var writer = self.api.getWriter(.handshake);
+                    try self.handleFinished();
+                    try self.writeFinished(writer);
+                },
+                else => unreachable,
             }
         }
+    }
 
-        // private functions
+    // private functions
 
-        fn setUpMyX25519KeyPair(self: *Self) !void {
-            self.x25519_keypair = try crypto.dh.X25519.KeyPair.create(null);
-        }
+    fn setUpMyX25519KeyPair(self: *Self) !void {
+        self.x25519_keypair = try crypto.dh.X25519.KeyPair.create(null);
+    }
 
-        fn deriveSharedKey(self: *Self) !void {
-            self.shared_key = if (self.x25519_keypair != null and self.x25519_peer != null) ecdhe: {
-                break :ecdhe try X25519.scalarmult(self.x25519_keypair.?.secret_key, self.x25519_peer.?);
-            } else return Error.KeyNotInstalled;
-        }
+    fn deriveSharedKey(self: *Self) !void {
+        self.shared_key = if (self.x25519_keypair != null and self.x25519_peer != null) ecdhe: {
+            break :ecdhe try X25519.scalarmult(self.x25519_keypair.?.secret_key, self.x25519_peer.?);
+        } else return Error.KeyNotInstalled;
+    }
 
-        /// setup early key
-        fn setUpEarly(self: *Self, psk: ?[]const u8) void {
-            const ikm = psk orelse &[_]u8{0} ** Hmac.key_length;
-            self.early_secret = Hkdf.extract(&[_]u8{0}, ikm);
-        }
+    /// setup early key
+    fn setUpEarly(self: *Self, psk: ?[]const u8) void {
+        const ikm = psk orelse &[_]u8{0} ** Hmac.key_length;
+        self.early_secret = Hkdf.extract(&[_]u8{0}, ikm);
+    }
 
-        /// setup handshake key
-        fn setUpHandshake(self: *Self) !void {
-            const allocator = self.allocator;
-            const early_secret = self.early_secret orelse return Error.KeyNotInstalled;
-            var early_derived: [Sha256.digest_length]u8 = undefined;
-            deriveSecret(HkdfAbst.get(.sha256), &early_derived, early_secret, "derived", "");
+    /// setup handshake key
+    fn setUpHandshake(self: *Self) !void {
+        const allocator = self.allocator;
+        const early_secret = self.early_secret orelse return Error.KeyNotInstalled;
+        var early_derived: [Sha256.digest_length]u8 = undefined;
+        deriveSecret(HkdfAbst.get(.sha256), &early_derived, early_secret, "derived", "");
 
-            const ecdhe_input = self.shared_key orelse [_]u8{0} ** Hmac.key_length;
-            const hs_secret = Hkdf.extract(&early_derived, &ecdhe_input);
-            self.handshake_secret = hs_secret;
+        const ecdhe_input = self.shared_key orelse [_]u8{0} ** Hmac.key_length;
+        const hs_secret = Hkdf.extract(&early_derived, &ecdhe_input);
+        self.handshake_secret = hs_secret;
 
-            if (self.raw_ch) |raw_ch| if (self.raw_sh) |raw_sh| {
-                const message = try mem.concat(allocator, u8, &[_][]const u8{
-                    raw_ch.data.items,
-                    raw_sh.data.items,
-                });
-                defer allocator.free(message);
-                const client_handshake = TlsKey.deriveHandshakeClient(hs_secret, message);
-                const server_handshake = TlsKey.deriveHandshakeServer(hs_secret, message);
-                self.client_handshake = client_handshake;
-                self.server_handshake = server_handshake;
-
-                // TODO: make algorithm changable
-                const hkdf = HkdfAbst.get(.sha256);
-                const aead = AeadAbst.get(.aes128gcm);
-                self.api.setWriteSecret(.handshake, aead, hkdf, &client_handshake.secret);
-                self.api.setReadSecret(.handshake, aead, hkdf, &server_handshake.secret);
-            } else return Error.MessageNotInstalled;
-        }
-
-        fn setUpMaster(self: *Self) !void {
-            const allocator = self.allocator;
-            const hs_secret = self.handshake_secret orelse return Error.KeyNotInstalled;
-            var hs_derived: [Sha256.digest_length]u8 = undefined;
-            deriveSecret(HkdfAbst.get(.sha256), &hs_derived, hs_secret, "derived", "");
-
-            const extract_input = [_]u8{0} ** Hmac.key_length;
-            const master_secret = Hkdf.extract(&hs_derived, &extract_input);
-            self.master_secret = master_secret;
-
-            const raw_ch = self.raw_ch orelse return Error.KeyNotInstalled;
-            const raw_sh = self.raw_sh orelse return Error.KeyNotInstalled;
-            const raw_ee = self.raw_ee orelse return Error.KeyNotInstalled;
-            const raw_cert = self.raw_cert orelse return Error.KeyNotInstalled;
-            const raw_cv = self.raw_cv orelse return Error.KeyNotInstalled;
-            const raw_sfin = self.raw_sfin orelse return Error.KeyNotInstalled;
-
+        if (self.raw_ch) |raw_ch| if (self.raw_sh) |raw_sh| {
             const message = try mem.concat(allocator, u8, &[_][]const u8{
+                raw_ch.data.items,
+                raw_sh.data.items,
+            });
+            defer allocator.free(message);
+            const client_handshake = TlsKey.deriveHandshakeClient(hs_secret, message);
+            const server_handshake = TlsKey.deriveHandshakeServer(hs_secret, message);
+            self.client_handshake = client_handshake;
+            self.server_handshake = server_handshake;
+
+            // TODO: make algorithm changable
+            const hkdf = HkdfAbst.get(.sha256);
+            const aead = AeadAbst.get(.aes128gcm);
+            self.api.setWriteSecret(.handshake, aead, hkdf, &client_handshake.secret);
+            self.api.setReadSecret(.handshake, aead, hkdf, &server_handshake.secret);
+        } else return Error.MessageNotInstalled;
+    }
+
+    fn setUpMaster(self: *Self) !void {
+        const allocator = self.allocator;
+        const hs_secret = self.handshake_secret orelse return Error.KeyNotInstalled;
+        var hs_derived: [Sha256.digest_length]u8 = undefined;
+        deriveSecret(HkdfAbst.get(.sha256), &hs_derived, hs_secret, "derived", "");
+
+        const extract_input = [_]u8{0} ** Hmac.key_length;
+        const master_secret = Hkdf.extract(&hs_derived, &extract_input);
+        self.master_secret = master_secret;
+
+        const raw_ch = self.raw_ch orelse return Error.KeyNotInstalled;
+        const raw_sh = self.raw_sh orelse return Error.KeyNotInstalled;
+        const raw_ee = self.raw_ee orelse return Error.KeyNotInstalled;
+        const raw_cert = self.raw_cert orelse return Error.KeyNotInstalled;
+        const raw_cv = self.raw_cv orelse return Error.KeyNotInstalled;
+        const raw_sfin = self.raw_sfin orelse return Error.KeyNotInstalled;
+
+        const message = try mem.concat(allocator, u8, &[_][]const u8{
+            raw_ch.data.items,
+            raw_sh.data.items,
+            raw_ee.data.items,
+            raw_cert.data.items,
+            raw_cv.data.items,
+            raw_sfin.data.items,
+        });
+        defer allocator.free(message);
+        const client_master = TlsKey.deriveApplicationClient(master_secret, message);
+        const server_master = TlsKey.deriveApplicationServer(master_secret, message);
+
+        self.client_master = client_master;
+        self.server_master = server_master;
+
+        // TODO: make algorithm changable
+        const hkdf = HkdfAbst.get(.sha256);
+        const aead = AeadAbst.get(.aes128gcm);
+        self.api.setWriteSecret(.handshake, aead, hkdf, &client_master.secret);
+        self.api.setReadSecret(.handshake, aead, hkdf, &server_master.secret);
+    }
+
+    /// Reads bytes from self.raw_sh and handle it
+    /// when self.raw_sh is not completed (its length is shorter
+    /// than the length field indicates), does nothing
+    fn handleServerHello(
+        self: *Self,
+    ) !void {
+        const raw_bytes =
+            self.raw_sh orelse return;
+        if (!raw_bytes.isComplete())
+            return;
+
+        var stream = std.io.fixedBufferStream(raw_bytes.data.items);
+        const s_hello = try tls.Handshake.decode(stream.reader(), self.allocator);
+        defer s_hello.deinit();
+
+        for (s_hello.server_hello.extensions.items) |ext| {
+            if (@as(extension.ExtensionType, ext) == .key_share) {
+                self.x25519_peer = [_]u8{0} ** 32;
+                mem.copy(u8, &self.x25519_peer.?, ext.key_share.server_share.?.key_exchange.items);
+            }
+        }
+
+        // setup key
+        self.setUpEarly(null);
+        try self.deriveSharedKey();
+        try self.setUpHandshake();
+
+        // The next state is wait encrypted extensions
+        self.state = .wait_ee;
+    }
+
+    /// TODO: implement handling encrypted extensions
+    fn handleEncryptedExtensions(
+        self: *Self,
+    ) !void {
+        const raw_bytes =
+            self.raw_ee orelse return;
+        if (!raw_bytes.isComplete())
+            return;
+
+        self.state = .wait_cert_cr;
+    }
+
+    /// TODO: implement handling certificate
+    fn handleCertificate(
+        self: *Self,
+    ) !void {
+        const raw_bytes =
+            self.raw_cert orelse return;
+        if (!raw_bytes.isComplete())
+            return;
+
+        self.state = .wait_cv;
+    }
+
+    /// TODO: implement handling certificate verify
+    fn handleCertificateVerify(
+        self: *Self,
+    ) !void {
+        const raw_bytes =
+            self.raw_cv orelse return;
+        if (!raw_bytes.isComplete())
+            return;
+
+        self.state = .wait_fin;
+    }
+
+    fn handleFinished(
+        self: *Self,
+    ) !void {
+        const raw_bytes =
+            self.raw_sfin orelse return;
+        if (!raw_bytes.isComplete())
+            return;
+
+        // setup master keys
+        try self.setUpMaster();
+
+        self.state = .connected;
+    }
+
+    /// returns ClientHello contained in Handshake union
+    fn createClientHello(
+        self: *Self,
+        quic_scid: []const u8,
+    ) !tls.Handshake {
+        const allocator = self.allocator;
+        var c_hello = try tls.ClientHello.init(allocator);
+        errdefer c_hello.deinit();
+        try c_hello.appendCipher(.{ 0x13, 0x01 }); // TLS_AES_128_GCM_SHA256
+
+        const my_kp = self.x25519_keypair orelse return Error.KeyNotInstalled;
+
+        var extensions = [_]extension.Extension{
+            supported_groups: {
+                var sg = extension.SupportedGroups.init();
+                try sg.append(.x25519);
+                break :supported_groups extension.Extension{ .supported_groups = sg };
+            },
+            signature_algorithms: {
+                var sa = extension.SignatureAlgorithms.init();
+                try sa.appendSlice(&[_]extension.SignatureScheme{
+                    .ecdsa_secp256r1_sha256,
+                    .rsa_pss_rsae_sha256,
+                    .rsa_pksc1_sha256,
+                });
+                break :signature_algorithms extension.Extension{ .signature_algorithms = sa };
+            },
+            supported_versions: {
+                var sv = extension.SupportedVersions.init(.client_hello);
+                try sv.append(extension.SupportedVersions.TLS13);
+                break :supported_versions extension.Extension{ .supported_versions = sv };
+            },
+            key_share: {
+                var ks = extension.KeyShare.init(.client_hello, allocator);
+                var x25519_pub = std.ArrayList(u8).init(allocator);
+                try x25519_pub.appendSlice(&my_kp.public_key);
+                try ks.append(.{ .group = .x25519, .key_exchange = x25519_pub });
+                break :key_share extension.Extension{ .key_share = ks };
+            },
+            transport_param: {
+                var params = extension.QuicTransportParameters.init(allocator);
+                try params.appendParam(.initial_scid, quic_scid);
+                break :transport_param extension.Extension{ .quic_transport_parameters = params };
+            },
+        };
+
+        try c_hello.appendExtensionSlice(&extensions);
+
+        var hs = tls.Handshake{ .client_hello = c_hello };
+
+        self.raw_ch = blk: {
+            var temp = std.ArrayList(u8).init(allocator);
+            try hs.encode(temp.writer());
+            break :blk HandshakeRaw.fromArrayList(temp);
+        };
+
+        defer self.state = .wait_sh;
+        return hs;
+    }
+
+    fn writeFinished(self: *Self, writer: anytype) !void {
+        const raw_ch = self.raw_ch orelse return Error.MessageNotInstalled;
+        const raw_sh = self.raw_sh orelse return Error.MessageNotInstalled;
+        const raw_ee = self.raw_ee orelse return Error.MessageNotInstalled;
+        const raw_cert = self.raw_cert orelse return Error.MessageNotInstalled;
+        const raw_cv = self.raw_cv orelse return Error.MessageNotInstalled;
+        const raw_sfin = self.raw_sfin orelse return Error.MessageNotInstalled;
+
+        const messages = try mem.concat(
+            self.allocator,
+            u8,
+            &[_][]const u8{
                 raw_ch.data.items,
                 raw_sh.data.items,
                 raw_ee.data.items,
                 raw_cert.data.items,
                 raw_cv.data.items,
                 raw_sfin.data.items,
-            });
-            defer allocator.free(message);
-            const client_master = TlsKey.deriveApplicationClient(master_secret, message);
-            const server_master = TlsKey.deriveApplicationServer(master_secret, message);
+            },
+        );
+        defer self.allocator.free(messages);
 
-            self.client_master = client_master;
-            self.server_master = server_master;
-
-            // TODO: make algorithm changable
+        const base_key =
+            (self.client_handshake orelse return Error.KeyNotInstalled).secret;
+        const finished_key = fkey: {
+            var temp: [Sha256.digest_length]u8 = undefined;
             const hkdf = HkdfAbst.get(.sha256);
-            const aead = AeadAbst.get(.aes128gcm);
-            self.api.setWriteSecret(.handshake, aead, hkdf, &client_master.secret);
-            self.api.setReadSecret(.handshake, aead, hkdf, &server_master.secret);
-        }
+            hkdf.expandLabel(&temp, &base_key, "finished", "");
+            break :fkey temp;
+        };
 
-        /// Reads bytes from self.raw_sh and handle it
-        /// when self.raw_sh is not completed (its length is shorter
-        /// than the length field indicates), does nothing
-        fn handleServerHello(
-            self: *Self,
-        ) !void {
-            const raw_bytes =
-                self.raw_sh orelse return;
-            if (!raw_bytes.isComplete())
-                return;
+        var buf: [4 + Hmac.mac_length]u8 = undefined; // message header length + verify data length
+        buf[0..4].* = .{ 0x14, 0x00, 0x00, 0x20 };
+        const hash = h: {
+            var temp: [Sha256.digest_length]u8 = undefined;
+            Sha256.hash(messages, &temp, .{});
+            break :h temp;
+        };
+        Hmac.create(buf[4..], &hash, &finished_key);
 
-            var stream = std.io.fixedBufferStream(raw_bytes.data.items);
-            const s_hello = try tls.Handshake.decode(stream.reader(), self.allocator);
-            defer s_hello.deinit();
+        try writer.writeAll(&buf);
+    }
 
-            for (s_hello.server_hello.extensions.items) |ext| {
-                if (@as(extension.ExtensionType, ext) == .key_share) {
-                    self.x25519_peer = [_]u8{0} ** 32;
-                    mem.copy(u8, &self.x25519_peer.?, ext.key_share.server_share.?.key_exchange.items);
+    /// if raw_ptr.* is null create instance and write data to it
+    /// else, write data to existing instance.
+    fn handleRaw(
+        raw_ptr: *?HandshakeRaw,
+        buf_ptr: *Buffer(BUF_SIZE),
+        allocator: mem.Allocator,
+    ) !void {
+        if (raw_ptr.*) |*raw| {
+            const n = try raw.write(buf_ptr.getUnreadSlice());
+            buf_ptr.discard(n);
+            buf_ptr.realign();
+        } else {
+            raw_ptr.* = blk: {
+                if (buf_ptr.unreadLength() < 4) {
+                    return error.DataTooShort;
                 }
-            }
-
-            // setup key
-            self.setUpEarly(null);
-            try self.deriveSharedKey();
-            try self.setUpHandshake();
-
-            // The next state is wait encrypted extensions
-            self.state = .wait_ee;
-        }
-
-        /// TODO: implement handling encrypted extensions
-        fn handleEncryptedExtensions(
-            self: *Self,
-        ) !void {
-            const raw_bytes =
-                self.raw_ee orelse return;
-            if (!raw_bytes.isComplete())
-                return;
-
-            self.state = .wait_cert_cr;
-        }
-
-        /// TODO: implement handling certificate
-        fn handleCertificate(
-            self: *Self,
-        ) !void {
-            const raw_bytes =
-                self.raw_cert orelse return;
-            if (!raw_bytes.isComplete())
-                return;
-
-            self.state = .wait_cv;
-        }
-
-        /// TODO: implement handling certificate verify
-        fn handleCertificateVerify(
-            self: *Self,
-        ) !void {
-            const raw_bytes =
-                self.raw_cv orelse return;
-            if (!raw_bytes.isComplete())
-                return;
-
-            self.state = .wait_fin;
-        }
-
-        fn handleFinished(
-            self: *Self,
-        ) !void {
-            const raw_bytes =
-                self.raw_sfin orelse return;
-            if (!raw_bytes.isComplete())
-                return;
-
-            // setup master keys
-            try self.setUpMaster();
-
-            self.state = .connected;
-        }
-
-        /// returns ClientHello contained in Handshake union
-        fn createClientHello(
-            self: *Self,
-            quic_scid: []const u8,
-        ) !tls.Handshake {
-            const allocator = self.allocator;
-            var c_hello = try tls.ClientHello.init(allocator);
-            errdefer c_hello.deinit();
-            try c_hello.appendCipher(.{ 0x13, 0x01 }); // TLS_AES_128_GCM_SHA256
-
-            const my_kp = self.x25519_keypair orelse return Error.KeyNotInstalled;
-
-            var extensions = [_]extension.Extension{
-                supported_groups: {
-                    var sg = extension.SupportedGroups.init();
-                    try sg.append(.x25519);
-                    break :supported_groups extension.Extension{ .supported_groups = sg };
-                },
-                signature_algorithms: {
-                    var sa = extension.SignatureAlgorithms.init();
-                    try sa.appendSlice(&[_]extension.SignatureScheme{
-                        .ecdsa_secp256r1_sha256,
-                        .rsa_pss_rsae_sha256,
-                        .rsa_pksc1_sha256,
-                    });
-                    break :signature_algorithms extension.Extension{ .signature_algorithms = sa };
-                },
-                supported_versions: {
-                    var sv = extension.SupportedVersions.init(.client_hello);
-                    try sv.append(extension.SupportedVersions.TLS13);
-                    break :supported_versions extension.Extension{ .supported_versions = sv };
-                },
-                key_share: {
-                    var ks = extension.KeyShare.init(.client_hello, allocator);
-                    var x25519_pub = std.ArrayList(u8).init(allocator);
-                    try x25519_pub.appendSlice(&my_kp.public_key);
-                    try ks.append(.{ .group = .x25519, .key_exchange = x25519_pub });
-                    break :key_share extension.Extension{ .key_share = ks };
-                },
-                transport_param: {
-                    var params = extension.QuicTransportParameters.init(allocator);
-                    try params.appendParam(.initial_scid, quic_scid);
-                    break :transport_param extension.Extension{ .quic_transport_parameters = params };
-                },
-            };
-
-            try c_hello.appendExtensionSlice(&extensions);
-
-            var hs = tls.Handshake{ .client_hello = c_hello };
-
-            self.raw_ch = blk: {
-                var temp = std.ArrayList(u8).init(allocator);
-                try hs.encode(temp.writer());
-                break :blk HandshakeRaw.fromArrayList(temp);
-            };
-
-            defer self.state = .wait_sh;
-            return hs;
-        }
-
-        fn writeFinished(self: *Self, writer: anytype) !void {
-            const raw_ch = self.raw_ch orelse return Error.MessageNotInstalled;
-            const raw_sh = self.raw_sh orelse return Error.MessageNotInstalled;
-            const raw_ee = self.raw_ee orelse return Error.MessageNotInstalled;
-            const raw_cert = self.raw_cert orelse return Error.MessageNotInstalled;
-            const raw_cv = self.raw_cv orelse return Error.MessageNotInstalled;
-            const raw_sfin = self.raw_sfin orelse return Error.MessageNotInstalled;
-
-            const messages = try mem.concat(
-                self.allocator,
-                u8,
-                &[_][]const u8{
-                    raw_ch.data.items,
-                    raw_sh.data.items,
-                    raw_ee.data.items,
-                    raw_cert.data.items,
-                    raw_cv.data.items,
-                    raw_sfin.data.items,
-                },
-            );
-            defer self.allocator.free(messages);
-
-            const base_key =
-                (self.client_handshake orelse return Error.KeyNotInstalled).secret;
-            const finished_key = fkey: {
-                var temp: [Sha256.digest_length]u8 = undefined;
-                const hkdf = HkdfAbst.get(.sha256);
-                hkdf.expandLabel(&temp, &base_key, "finished", "");
-                break :fkey temp;
-            };
-
-            var buf: [4 + Hmac.mac_length]u8 = undefined; // message header length + verify data length
-            buf[0..4].* = .{ 0x14, 0x00, 0x00, 0x20 };
-            const hash = h: {
-                var temp: [Sha256.digest_length]u8 = undefined;
-                Sha256.hash(messages, &temp, .{});
-                break :h temp;
-            };
-            Hmac.create(buf[4..], &hash, &finished_key);
-
-            try writer.writeAll(&buf);
-        }
-
-        /// if raw_ptr.* is null create instance and write data to it
-        /// else, write data to existing instance.
-        fn handleRaw(
-            raw_ptr: *?HandshakeRaw,
-            buf_ptr: *Buffer(BUF_SIZE),
-            allocator: mem.Allocator,
-        ) !void {
-            if (raw_ptr.*) |*raw| {
-                const n = try raw.write(buf_ptr.getUnreadSlice());
+                const slice =
+                    buf_ptr.getUnreadSlice();
+                const max_len =
+                    mem.readIntBig(u24, slice[1..4]) + 4;
+                var raw = try HandshakeRaw.init(
+                    allocator,
+                    @intCast(usize, max_len),
+                );
+                const n = try raw.write(slice[0..std.math.min(max_len, slice.len)]);
                 buf_ptr.discard(n);
                 buf_ptr.realign();
-            } else {
-                raw_ptr.* = blk: {
-                    if (buf_ptr.unreadLength() < 4) {
-                        return error.DataTooShort;
-                    }
-                    const slice =
-                        buf_ptr.getUnreadSlice();
-                    const max_len =
-                        mem.readIntBig(u24, slice[1..4]) + 4;
-                    var raw = try HandshakeRaw.init(
-                        allocator,
-                        @intCast(usize, max_len),
-                    );
-                    const n = try raw.write(slice[0..std.math.min(max_len, slice.len)]);
-                    buf_ptr.discard(n);
-                    buf_ptr.realign();
-                    break :blk raw;
-                };
-            }
+                break :blk raw;
+            };
         }
-    };
-}
+    }
+};
 
 fn allocParseHex(in: []const u8) ![]u8 {
     const buf = try testing.allocator.alloc(u8, in.len / 2);
@@ -541,11 +536,8 @@ fn allocParseHex(in: []const u8) ![]u8 {
 const DummyStream = struct {
     stream: Stream,
 
-    pub const Error = Stream.WriteError;
     pub const Stream = io.FixedBufferStream([]u8);
     const Self = @This();
-
-    pub const Api = QuicApi(Stream.WriteError);
 
     pub fn init(buf: []u8) Self {
         var instance = Self{
@@ -556,15 +548,15 @@ const DummyStream = struct {
 
     pub fn setSecretDummy(_: *Self, _: Epoch, _: AeadAbst, _: HkdfAbst, _: []const u8) void {}
 
-    pub fn writeData(self: *Self, _: Epoch, data: []const u8) Error!usize {
+    pub fn writeData(self: *Self, _: Epoch, data: []const u8) QuicApi.Error!usize {
         // const info = @typeInfo(*Self);
         // const alignment = info.Pointer.alignment;
         // var self = @ptrCast(*Self, @alignCast(alignment, ptr));
-        return self.stream.writer().write(data);
+        return self.stream.writer().write(data) catch return error.WriteCryptoStreamFailed;
     }
 
-    pub fn getApi(self: *Self) Api {
-        return Api.init(
+    pub fn getApi(self: *Self) QuicApi {
+        return QuicApi.init(
             self,
             setSecretDummy,
             setSecretDummy,
@@ -575,12 +567,11 @@ const DummyStream = struct {
 
 // simple 1-RTT Handshake from https://www.rfc-editor.org/rfc/rfc8448.html#section-3
 test "handleStream" {
-    const Provider = ClientImpl(DummyStream.Api);
     const allocator = testing.allocator;
     var dummy_buf = [_]u8{0} ** 4096;
     var dummy_stream = DummyStream.init(&dummy_buf);
     var dummy_api = dummy_stream.getApi();
-    var client = Provider.initWithApi(allocator, dummy_api);
+    var client = Client.initWithApi(allocator, dummy_api);
     defer client.deinit();
 
     // 1. setup client hello
