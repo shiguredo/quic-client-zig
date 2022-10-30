@@ -760,26 +760,22 @@ const DummyStream = struct {
         return instance;
     }
 
-    pub fn setSecretDummy(_: *anyopaque, _: Epoch, _: AeadAbst, _: HkdfAbst, _: []const u8) void {}
+    pub fn setSecretDummy(_: *Self, _: Epoch, _: AeadAbst, _: HkdfAbst, _: []const u8) void {}
 
-    pub fn writeData(ptr: *anyopaque, _: Epoch, data: []const u8) Error!usize {
-        const info = @typeInfo(*Self);
-        const alignment = info.Pointer.alignment;
-        var self = @ptrCast(*Self, @alignCast(alignment, ptr));
+    pub fn writeData(self: *Self, _: Epoch, data: []const u8) Error!usize {
+        // const info = @typeInfo(*Self);
+        // const alignment = info.Pointer.alignment;
+        // var self = @ptrCast(*Self, @alignCast(alignment, ptr));
         return self.stream.writer().write(data);
     }
 
-    pub const vtable = Api.VTable{
-        .setReadSecret = setSecretDummy,
-        .setWriteSecret = setSecretDummy,
-        .writeHandshakeData = writeData,
-    };
-
     pub fn getApi(self: *Self) Api {
-        return .{
-            .ptr = @ptrCast(*anyopaque, self),
-            .vtable = &vtable,
-        };
+        return Api.init(
+            self,
+            setSecretDummy,
+            setSecretDummy,
+            writeData,
+        );
     }
 };
 
