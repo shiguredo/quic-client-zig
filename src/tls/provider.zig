@@ -481,7 +481,8 @@ pub fn ClientImpl(comptime ApiType: type) type {
                 (self.client_handshake orelse return Error.KeyNotInstalled).secret;
             const finished_key = fkey: {
                 var temp: [Sha256.digest_length]u8 = undefined;
-                q_crypto.hkdfExpandLabel(&temp, base_key, "finished", "");
+                const hkdf = HkdfAbst.get(.sha256);
+                hkdf.expandLabel(&temp, &base_key, "finished", "");
                 break :fkey temp;
             };
 
