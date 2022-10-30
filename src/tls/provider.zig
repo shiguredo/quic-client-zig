@@ -9,14 +9,9 @@ const connection = @import("../connection.zig");
 const q_crypto = @import("../crypto.zig");
 const HkdfAbst = q_crypto.HkdfAbst;
 const AeadAbst = q_crypto.AeadAbst;
-const QuicKeys = q_crypto.QuicKeys;
-const QuicKeyBinder = q_crypto.QuicKeyBinder;
 const tls = @import("../tls.zig");
 const HandshakeRaw = @import("handshake.zig").HandshakeRaw;
 const extension = tls.extension;
-const packet = @import("../packet.zig");
-// const Stream = @import("../stream.zig").Stream;
-const CryptoStreams = @import("../stream.zig").CryptoStreams;
 const Buffer = @import("../buffer.zig").Buffer;
 
 const QuicApi = @import("quic_api.zig").QuicApi;
@@ -171,11 +166,9 @@ pub fn ClientImpl(comptime ApiType: type) type {
         /// initiate TLS handshake, takes QUIC source connection ID and initial crypto stream.
         pub fn initiateHandshake(
             self: *Self,
-            // c_dcid: connection.ConnectionId,
             c_scid: connection.ConnectionId,
         ) !void {
             try self.setUpMyX25519KeyPair();
-            // self.setUpInitial(c_dcid.id.constSlice());
             var writer = self.api.getWriter(.initial);
             var ch_msg = try self.createClientHello(c_scid.id.constSlice());
             defer ch_msg.deinit();
