@@ -47,8 +47,8 @@ pub fn QuicApi(
         }
 
         pub fn getWriter(self: *Self, epoch: Epoch) Writer {
-            var ctx = IoContext{.ptr = self, .epoch = epoch};
-            return Writer{.context = ctx};
+            var ctx = IoContext{ .ptr = self, .epoch = epoch };
+            return Writer{ .context = ctx };
         }
     };
 }
