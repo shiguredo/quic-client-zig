@@ -1,7 +1,7 @@
 const std = @import("std");
 const io = std.io;
 
-const Epoch = @import("provider.zig").Epoch;
+const Epoch = @import("client.zig").Epoch;
 const q_crypto = @import("../crypto.zig");
 const AeadAbst = q_crypto.AeadAbst;
 const HkdfAbst = q_crypto.HkdfAbst;
