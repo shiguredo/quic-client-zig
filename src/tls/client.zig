@@ -16,9 +16,6 @@ const Buffer = @import("../util.zig").Buffer;
 
 const QuicApi = @import("quic_api.zig").QuicApi;
 
-const Sha256 = q_crypto.Sha256;
-const Hmac = q_crypto.Hmac;
-const Hkdf = q_crypto.Hkdf;
 const X25519 = crypto.dh.X25519;
 
 ///  TLS client's state machine
@@ -43,52 +40,38 @@ pub const Epoch = enum {
 };
 
 pub const TlsKey = struct {
-    secret: [Hmac.key_length]u8 = undefined,
+    secret: [HkdfAbst.KEY_LENGTH]u8 = undefined,
 
     const Self = @This();
 
     /// derive handshake traffic keys for client
-    pub fn deriveHandshakeClient(tls_secret: [Hmac.key_length]u8, message: []const u8) Self {
+    pub fn deriveHandshakeClient(hkdf: HkdfAbst, tls_secret: [HkdfAbst.KEY_LENGTH]u8, message: []const u8) Self {
         var instance: Self = undefined;
-        deriveSecret(HkdfAbst.get(.sha256), &instance.secret, tls_secret, "c hs traffic", message);
+        hkdf.deriveSecret(&instance.secret, tls_secret, "c hs traffic", message);
         return instance;
     }
 
     /// derive handshake traffic keys for server
-    pub fn deriveHandshakeServer(tls_secret: [Hmac.key_length]u8, message: []const u8) Self {
+    pub fn deriveHandshakeServer(hkdf: HkdfAbst, tls_secret: [HkdfAbst.KEY_LENGTH]u8, message: []const u8) Self {
         var instance: Self = undefined;
-        deriveSecret(HkdfAbst.get(.sha256), &instance.secret, tls_secret, "s hs traffic", message);
+        hkdf.deriveSecret(&instance.secret, tls_secret, "s hs traffic", message);
         return instance;
     }
 
     /// derive handshake traffic keys for client
-    pub fn deriveApplicationClient(tls_secret: [Hmac.key_length]u8, message: []const u8) Self {
+    pub fn deriveApplicationClient(hkdf: HkdfAbst, tls_secret: [HkdfAbst.KEY_LENGTH]u8, message: []const u8) Self {
         var instance: Self = undefined;
-        deriveSecret(HkdfAbst.get(.sha256), &instance.secret, tls_secret, "c ap traffic", message);
+        hkdf.deriveSecret(&instance.secret, tls_secret, "c ap traffic", message);
         return instance;
     }
 
     /// derive handshake traffic keys for server
-    pub fn deriveApplicationServer(tls_secret: [Hmac.key_length]u8, message: []const u8) Self {
+    pub fn deriveApplicationServer(hkdf: HkdfAbst, tls_secret: [HkdfAbst.KEY_LENGTH]u8, message: []const u8) Self {
         var instance: Self = undefined;
-        deriveSecret(HkdfAbst.get(.sha256), &instance.secret, tls_secret, "s ap traffic", message);
+        hkdf.deriveSecret(&instance.secret, tls_secret, "s ap traffic", message);
         return instance;
     }
 };
-
-/// TODO: implement this function in HkdfAbst and remove this.
-pub fn deriveSecret(
-    hkdf: HkdfAbst,
-    out: *[Hmac.key_length]u8,
-    secret: [Hmac.key_length]u8,
-    label: []const u8,
-    message: []const u8,
-) void {
-    var h: [Sha256.digest_length]u8 = undefined;
-    Sha256.hash(message, &h, .{}); // TODO: replace Sha256
-
-    hkdf.expandLabel(out, &secret, label, &h);
-}
 
 /// note: only supports aes128gcm for AEAD and hkdfsha256 for HKDF now
 pub const Client = struct {
@@ -96,17 +79,20 @@ pub const Client = struct {
 
     state: State = .start,
 
-    initial_secret: [Hmac.key_length]u8 = undefined,
+    initial_secret: [HkdfAbst.KEY_LENGTH]u8 = undefined,
     client_initial: ?TlsKey = null,
     server_initial: ?TlsKey = null,
 
-    early_secret: ?[Hmac.key_length]u8 = null,
-    handshake_secret: ?[Hmac.key_length]u8 = null,
+    early_secret: ?[HkdfAbst.KEY_LENGTH]u8 = null,
+    handshake_secret: ?[HkdfAbst.KEY_LENGTH]u8 = null,
     client_handshake: ?TlsKey = null,
     server_handshake: ?TlsKey = null,
-    master_secret: ?[Hmac.key_length]u8 = null,
+    master_secret: ?[HkdfAbst.KEY_LENGTH]u8 = null,
     client_master: ?TlsKey = null,
     server_master: ?TlsKey = null,
+
+    hkdf: ?HkdfAbst = null,
+    aead: ?AeadAbst = null,
 
     x25519_keypair: ?X25519.KeyPair = null,
     x25519_peer: ?[X25519.public_length]u8 = null,
@@ -164,6 +150,10 @@ pub const Client = struct {
         self: *Self,
         c_scid: connection.ConnectionId,
     ) !void {
+        // TODO: make algorithm changable
+        self.hkdf = HkdfAbst.get(.sha256);
+        self.aead = AeadAbst.get(.aes128gcm);
+
         try self.setUpMyX25519KeyPair();
         var writer = self.api.getWriter(.initial);
         var ch_msg = try self.createClientHello(c_scid.id.constSlice());
@@ -236,20 +226,27 @@ pub const Client = struct {
     }
 
     /// setup early key
-    fn setUpEarly(self: *Self, psk: ?[]const u8) void {
-        const ikm = psk orelse &[_]u8{0} ** Hmac.key_length;
-        self.early_secret = Hkdf.extract(&[_]u8{0}, ikm);
+    fn setUpEarly(self: *Self, psk: ?[]const u8) !void {
+        const ikm = psk orelse &[_]u8{0} ** HkdfAbst.KEY_LENGTH;
+        const hkdf = self.hkdf orelse return Error.KeyNotInstalled;
+        var early_secret = [_]u8{0} ** 32;
+        hkdf.extract(&early_secret, &[_]u8{0}, ikm);
+        self.early_secret = early_secret;
     }
 
     /// setup handshake key
     fn setUpHandshake(self: *Self) !void {
+        const hkdf = self.hkdf orelse return Error.KeyNotInstalled;
+        const aead = self.aead orelse return Error.KeyNotInstalled;
+
         const allocator = self.allocator;
         const early_secret = self.early_secret orelse return Error.KeyNotInstalled;
-        var early_derived: [Sha256.digest_length]u8 = undefined;
-        deriveSecret(HkdfAbst.get(.sha256), &early_derived, early_secret, "derived", "");
+        var early_derived = [_]u8{0} ** HkdfAbst.KEY_LENGTH;
+        hkdf.deriveSecret(&early_derived, early_secret, "derived", "");
 
-        const ecdhe_input = self.shared_key orelse [_]u8{0} ** Hmac.key_length;
-        const hs_secret = Hkdf.extract(&early_derived, &ecdhe_input);
+        const ecdhe_input = self.shared_key orelse [_]u8{0} ** HkdfAbst.KEY_LENGTH;
+        var hs_secret = [_]u8{0} ** 32;
+        hkdf.extract(&hs_secret, &early_derived, &ecdhe_input);
         self.handshake_secret = hs_secret;
 
         if (self.raw_ch) |raw_ch| if (self.raw_sh) |raw_sh| {
@@ -258,27 +255,29 @@ pub const Client = struct {
                 raw_sh.data.items,
             });
             defer allocator.free(message);
-            const client_handshake = TlsKey.deriveHandshakeClient(hs_secret, message);
-            const server_handshake = TlsKey.deriveHandshakeServer(hs_secret, message);
+            // TODO: make algorithm changable
+            const client_handshake = TlsKey.deriveHandshakeClient(hkdf, hs_secret, message);
+            const server_handshake = TlsKey.deriveHandshakeServer(hkdf, hs_secret, message);
             self.client_handshake = client_handshake;
             self.server_handshake = server_handshake;
 
-            // TODO: make algorithm changable
-            const hkdf = HkdfAbst.get(.sha256);
-            const aead = AeadAbst.get(.aes128gcm);
             self.api.setWriteSecret(.handshake, aead, hkdf, &client_handshake.secret);
             self.api.setReadSecret(.handshake, aead, hkdf, &server_handshake.secret);
         } else return Error.MessageNotInstalled;
     }
 
     fn setUpMaster(self: *Self) !void {
+        const hkdf = self.hkdf orelse return Error.KeyNotInstalled;
+        const aead = self.aead orelse return Error.KeyNotInstalled;
+
         const allocator = self.allocator;
         const hs_secret = self.handshake_secret orelse return Error.KeyNotInstalled;
-        var hs_derived: [Sha256.digest_length]u8 = undefined;
-        deriveSecret(HkdfAbst.get(.sha256), &hs_derived, hs_secret, "derived", "");
+        var hs_derived: [32]u8 = undefined;
+        hkdf.deriveSecret(&hs_derived, hs_secret, "derived", "");
 
-        const extract_input = [_]u8{0} ** Hmac.key_length;
-        const master_secret = Hkdf.extract(&hs_derived, &extract_input);
+        const extract_input = [_]u8{0} ** HkdfAbst.KEY_LENGTH;
+        var master_secret = [_]u8{0} ** 32;
+        hkdf.extract(&master_secret, &hs_derived, &extract_input);
         self.master_secret = master_secret;
 
         const raw_ch = self.raw_ch orelse return Error.KeyNotInstalled;
@@ -297,15 +296,12 @@ pub const Client = struct {
             raw_sfin.data.items,
         });
         defer allocator.free(message);
-        const client_master = TlsKey.deriveApplicationClient(master_secret, message);
-        const server_master = TlsKey.deriveApplicationServer(master_secret, message);
+        const client_master = TlsKey.deriveApplicationClient(hkdf, master_secret, message);
+        const server_master = TlsKey.deriveApplicationServer(hkdf, master_secret, message);
 
         self.client_master = client_master;
         self.server_master = server_master;
 
-        // TODO: make algorithm changable
-        const hkdf = HkdfAbst.get(.sha256);
-        const aead = AeadAbst.get(.aes128gcm);
         self.api.setWriteSecret(.handshake, aead, hkdf, &client_master.secret);
         self.api.setReadSecret(.handshake, aead, hkdf, &server_master.secret);
     }
@@ -333,7 +329,7 @@ pub const Client = struct {
         }
 
         // setup key
-        self.setUpEarly(null);
+        try self.setUpEarly(null);
         try self.deriveSharedKey();
         try self.setUpHandshake();
 
@@ -452,6 +448,8 @@ pub const Client = struct {
     }
 
     fn writeFinished(self: *Self, writer: anytype) !void {
+        const hkdf = self.hkdf orelse return Error.KeyNotInstalled;
+
         const raw_ch = self.raw_ch orelse return Error.MessageNotInstalled;
         const raw_sh = self.raw_sh orelse return Error.MessageNotInstalled;
         const raw_ee = self.raw_ee orelse return Error.MessageNotInstalled;
@@ -476,22 +474,19 @@ pub const Client = struct {
         const base_key =
             (self.client_handshake orelse return Error.KeyNotInstalled).secret;
         const finished_key = fkey: {
-            var temp: [Sha256.digest_length]u8 = undefined;
-            const hkdf = HkdfAbst.get(.sha256);
-            hkdf.expandLabel(&temp, &base_key, "finished", "");
-            break :fkey temp;
+            var fkey_buf: [HkdfAbst.KEY_LENGTH]u8 = undefined;
+            hkdf.expandLabel(&fkey_buf, &base_key, "finished", "");
+            break :fkey fkey_buf;
         };
 
-        var buf: [4 + Hmac.mac_length]u8 = undefined; // message header length + verify data length
-        buf[0..4].* = .{ 0x14, 0x00, 0x00, 0x20 };
-        const hash = h: {
-            var temp: [Sha256.digest_length]u8 = undefined;
-            Sha256.hash(messages, &temp, .{});
-            break :h temp;
-        };
-        Hmac.create(buf[4..], &hash, &finished_key);
+        var buf: [4 + HkdfAbst.MAX_POSSIBLE_HASH_LEN]u8 = undefined; // message header length + verify data length
+        var finished = buf[0 .. 4 + hkdf.mac_length];
+        finished[0..4].* = .{ 0x14, 0x00, 0x00, 0x20 };
+        const hash = hkdf.hash(messages);
+        const mac = hkdf.create(hash.constSlice(), &finished_key);
+        mem.copy(u8, finished[4 .. 4 + hkdf.mac_length], mac.constSlice());
 
-        try writer.writeAll(&buf);
+        try writer.writeAll(finished);
     }
 
     /// if raw_ptr.* is null create instance and write data to it
@@ -573,6 +568,8 @@ test "handleStream" {
     var dummy_api = dummy_stream.getApi();
     var client = Client.initWithApi(allocator, dummy_api);
     defer client.deinit();
+    client.hkdf = HkdfAbst.get(.sha256);
+    client.aead = AeadAbst.get(.aes128gcm);
 
     // 1. setup client hello
 

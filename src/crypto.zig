@@ -11,7 +11,6 @@ const util = @import("util.zig");
 const tls = @import("tls.zig");
 const PacketTypes = @import("packet.zig").PacketTypes;
 
-pub const Sha256 = crypto.hash.sha2.Sha256;
 pub const Hmac = crypto.auth.hmac.sha2.HmacSha256;
 pub const Hkdf = crypto.kdf.hkdf.HkdfSha256;
 
@@ -32,6 +31,15 @@ pub const HkdfAbst = struct {
 
     pub const KEY_LENGTH = 32;
 
+    pub const Sha256 = crypto.hash.sha2.Sha256;
+    pub const Sha512 = crypto.hash.sha2.Sha512;
+
+    pub const HmacSha256 = crypto.auth.hmac.sha2.HmacSha256;
+    pub const HmacSha512 = crypto.auth.hmac.sha2.HmacSha512;
+
+    /// the hash output length equals to mac_length.
+    pub const MAX_POSSIBLE_HASH_LEN = Sha512.digest_length;
+
     const Self = @This();
 
     pub const VTable = struct {
@@ -48,26 +56,26 @@ pub const HkdfAbst = struct {
     const instance_sha256 = Self._createComptime(.sha256);
     const instance_sha512 = Self._createComptime(.sha512);
 
-    pub fn get(hash: HashTypes) Self {
-        return switch (hash) {
+    pub fn get(hash_type: HashTypes) Self {
+        return switch (hash_type) {
             .sha256 => instance_sha256,
             .sha512 => instance_sha512,
         };
     }
 
-    fn _createComptime(comptime hash: HashTypes) Self {
-        const vtable = switch (hash) {
+    fn _createComptime(comptime hash_type: HashTypes) Self {
+        const vtable = switch (hash_type) {
             .sha256 => _vtableFromHmac(crypto.auth.hmac.sha2.HmacSha256),
             .sha512 => _vtableFromHmac(crypto.auth.hmac.sha2.HmacSha512),
         };
 
-        const mac_length = switch (hash) {
+        const mac_length = switch (hash_type) {
             .sha256 => crypto.auth.hmac.sha2.HmacSha256.mac_length,
             .sha512 => crypto.auth.hmac.sha2.HmacSha512.mac_length,
         };
 
         return .{
-            .hash_type = hash,
+            .hash_type = hash_type,
             .mac_length = mac_length,
             .vtable = &vtable,
         };
@@ -104,6 +112,30 @@ pub const HkdfAbst = struct {
         self.vtable.expand(out, ctx, prk);
     }
 
+    pub const HashReturn = std.BoundedArray(u8, MAX_POSSIBLE_HASH_LEN);
+
+    /// Wrapper function of
+    /// `Sha2X32.hash(b: []const u8, out: *[digest_length]u8, options: Options)`
+    pub fn hash(self: Self, b: []const u8) HashReturn {
+        var ret = HashReturn.init(self.mac_length) catch unreachable;
+        switch (self.hash_type) {
+            .sha256 => Sha256.hash(b, ret.buffer[0..Sha256.digest_length], .{}),
+            .sha512 => Sha512.hash(b, ret.buffer[0..Sha512.digest_length], .{}),
+        }
+        return ret;
+    }
+
+    /// Wrapper function of
+    /// `Hmac.create(out: *[mac_length]u8, msg: []const u8, key: []const u8)`
+    pub fn create(self: Self, msg: []const u8, key: []const u8) HashReturn {
+        var ret = HashReturn.init(self.mac_length) catch unreachable;
+        switch (self.hash_type) {
+            .sha256 => HmacSha256.create(ret.buffer[0..Sha256.digest_length], msg, key),
+            .sha512 => HmacSha512.create(ret.buffer[0..Sha512.digest_length], msg, key),
+        }
+        return ret;
+    }
+
     /// Defined here: https://www.rfc-editor.org/rfc/rfc8446#section-7.1
     /// `secret.len` must be `HkdfAbst.KEY_LENGTH`, which is 32
     pub fn expandLabel(
@@ -117,6 +149,18 @@ pub const HkdfAbst = struct {
         var label_buf: [MAX_LABEL_LEN]u8 = undefined;
         const _label = _makeLabel(&label_buf, label, context, out.len);
         self.expand(out, _label, secret);
+    }
+
+    pub fn deriveSecret(
+        self: Self,
+        out: *[Hmac.key_length]u8,
+        secret: [Hmac.key_length]u8,
+        label: []const u8,
+        message: []const u8,
+    ) void {
+        const h = self.hash(message);
+
+        self.expandLabel(out, &secret, label, h.constSlice());
     }
 
     /// `out` must be longer than 255 + 255 + 2 = 512 bytes
