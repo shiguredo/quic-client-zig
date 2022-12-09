@@ -1,5 +1,5 @@
 aioquic==0.9.20
-certifi==2022.6.15
+certifi==2022.12.7
 cffi==1.15.1
 cryptography==37.0.4
 pycparser==2.21
